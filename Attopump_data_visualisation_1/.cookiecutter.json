@@ -1,0 +1,13 @@
+{
+  "_template": "https://github.com/bosd/cookiecutter-uv-hypermodern-python",
+  "author": "OJBS",
+  "copyright_year": "2026",
+  "development_status": "Development Status :: 1 - Planning",
+  "email": "s225207@dtu.dk",
+  "friendly_name": "atto1",
+  "github_user": "OskarDTU",
+  "license": "MIT",
+  "package_name": "Attopump_data_visualisation_1",
+  "project_name": "Attopump_data_visualisation_1",
+  "version": "0.0.0"
+}
