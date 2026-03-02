@@ -19,22 +19,26 @@ from Attopump_data_visualisation_1.io.onedrive_local import (
     read_csv_preview,
 )
 from .config import (
-    CONSTANT_FREQUENCY_CUTOFF,
     DEFAULT_CONSTANT_FREQUENCY_HZ,
     MAX_POINTS_DEFAULT,
     PLOT_BIN_WIDTH_HZ,
 )
 from .data_processor import (
     bin_by_frequency,
+    detect_test_type,
     detect_time_format,
     get_signal_columns,
     guess_signal_column,
     guess_time_column,
     is_constant_frequency_test,
+    load_test_metadata,
+    load_user_patterns,
     parse_sweep_spec_from_name,
     prepare_constant_frequency_data,
     prepare_sweep_data,
     prepare_time_series_data,
+    save_metadata_entry,
+    save_user_patterns,
 )
 from .plot_generator import (
     export_html,
@@ -86,6 +90,156 @@ try:
         parse_time_toggle = st.checkbox("Parse time as datetime", value=False, help="Enable for Flowboard timestamps. Disable for merged.csv elapsed seconds.")
         drop_na_toggle = st.checkbox("Drop NaN values", value=True)
         export_html_toggle = st.checkbox("Export plots as HTML", value=False)
+
+        # ── PLOT APPEARANCE ─────────────────────────────────────────
+        st.divider()
+        st.header("🎨 Plot Appearance")
+        plot_mode = st.selectbox(
+            "Plot type",
+            options=["lines", "markers", "lines+markers"],
+            index=0,
+            help="Lines = fast overview. Markers = see individual points. "
+                 "Lines+markers = both (slower for large datasets).",
+            key="plot_mode_select",
+        )
+        marker_size = st.slider(
+            "Marker / point size (px)",
+            min_value=1,
+            max_value=20,
+            value=4,
+            step=1,
+            key="marker_size_slider",
+        )
+        marker_opacity = st.slider(
+            "Marker opacity",
+            min_value=0.1,
+            max_value=1.0,
+            value=0.8,
+            step=0.05,
+            key="marker_opacity_slider",
+        )
+
+        # ── TEST TYPE OVERRIDE ──────────────────────────────────────
+        st.divider()
+        st.header("🔧 Test Type Override")
+        manual_test_type = st.selectbox(
+            "Override detected test type",
+            options=["Auto-detect", "Constant Frequency", "Frequency Sweep"],
+            index=0,
+            help="Force a test type instead of relying on auto-detection. "
+                 "Use this when folder names are misleading.",
+        )
+        with st.expander("ℹ️ How does test-type detection work?", expanded=False):
+            st.markdown(
+                """
+**The app classifies every test folder as either *Constant Frequency*
+or *Frequency Sweep* using a four-level priority system:**
+
+| Priority | Method | When it fires |
+|----------|--------|---------------|
+| 1 | **`freq_set_hz` column** | The CSV (merged.csv) contains a `freq_set_hz` column. If there is only **1** unique frequency value → *Constant*. If there are **many** → *Sweep*. This is the most reliable method. |
+| 2 | **Metadata file** | The folder name is found in `app/test_metadata.json`, which lists the correct type for every known test. You can edit this file manually or use the *Naming Conventions* section below. |
+| 3 | **Regex patterns** | The folder name matches one of the built-in sweep patterns (e.g. `1Hz_1500H_Hz_500_seconds`) or a user-defined pattern. |
+| 4 | **Unknown → Constant** | Nothing matched. The app defaults to *Constant* because that is the safest fallback (shows boxplot + histogram). |
+
+**When to use the override:**
+- A folder name looks like a sweep but was actually run at a constant
+  frequency (microcontroller bug).
+- A folder name is completely new and hasn't been added to the
+  metadata file yet.
+- You just want to quickly check how the data looks in the other
+  visualisation mode.
+
+Select **Constant Frequency** or **Frequency Sweep** above to bypass
+auto-detection for the currently selected folder.
+"""
+            )
+
+        st.divider()
+        # ── NAMING CONVENTION EDITOR ────────────────────────────────
+        with st.expander("🏷️ Naming Conventions", expanded=False):
+            st.markdown(
+                """
+### What is this?
+
+When you create a **new test** with a folder name the app has never
+seen before, it needs to know whether it is a *constant frequency* or
+a *frequency sweep* test.  This section lets you teach the app about
+new naming patterns **without editing any code**.
+
+---
+
+### Option A — Register a single folder
+
+Use the form below to permanently record a specific folder's test
+type in the metadata file (`app/test_metadata.json`).  This is the
+fastest way to fix a misclassified test.
+
+1. Paste the **exact folder name** (e.g. `20260302-1244-PUMP-20260227-4`).
+2. Choose **constant** or **sweep**.
+3. For constant tests, enter the frequency in Hz.
+4. Click **💾 Save to metadata**.
+
+---
+
+### Option B — Add a regex pattern for future folders
+
+If you are about to start using a **new naming scheme** for many
+folders, add a regex (regular expression) pattern here.  Any folder
+whose name matches one of these patterns will be classified as a
+sweep.  Folders that match *none* of the patterns fall back to the
+metadata file or default to constant.
+
+**Built-in patterns already handle:**
+- `10Hz_500Hz_60s` — standard sweep
+- `1Hz_1500H_Hz_500_seconds` — H_Hz typo variant
+- `1Hz-1kHz` — kHz shorthand
+
+**Example user pattern:**
+```
+(?P<start>\\d+)Hz_to_(?P<end>\\d+)Hz_(?P<dur>\\d+)min
+```
+This would match folder names like `100Hz_to_900Hz_5min`.
+
+Enter one pattern per line and click **💾 Save patterns**.
+"""
+            )
+
+            existing_patterns = load_user_patterns()
+            patterns_text = st.text_area(
+                "User sweep patterns (one regex per line)",
+                value="\n".join(existing_patterns),
+                height=100,
+                help="Example: (?P<start>\\d+)Hz_to_(?P<end>\\d+)Hz",
+            )
+            if st.button("💾 Save patterns"):
+                new_patterns = [
+                    line.strip()
+                    for line in patterns_text.splitlines()
+                    if line.strip()
+                ]
+                save_user_patterns(new_patterns)
+                st.success(f"Saved {len(new_patterns)} pattern(s).")
+
+            st.divider()
+            st.markdown("#### Register a single folder")
+            meta_folder = st.text_input("Folder name", key="meta_folder_input")
+            meta_type = st.selectbox(
+                "Test type", ["constant", "sweep"], key="meta_type_input"
+            )
+            meta_freq = st.number_input(
+                "Frequency (Hz, for constant)", value=500.0, key="meta_freq_input"
+            )
+            meta_note = st.text_input("Note", key="meta_note_input")
+            if st.button("💾 Save to metadata"):
+                if meta_folder.strip():
+                    entry: dict = {"type": meta_type, "note": meta_note}
+                    if meta_type == "constant":
+                        entry["frequency_hz"] = meta_freq
+                    save_metadata_entry(meta_folder.strip(), entry)
+                    st.success(f"Saved metadata for **{meta_folder.strip()}**.")
+                else:
+                    st.warning("Enter a folder name first.")
 
     # ========================================================================
     # EARLY VALIDATION: Is folder provided?
@@ -221,34 +375,69 @@ try:
     # ========================================================================
     # PROCESS DATA & DETERMINE TEST TYPE
     # ========================================================================
-    is_constant_freq_test = is_constant_frequency_test(selected_run_name)
+    # Data-driven detection hierarchy
+    detected_type, detection_method, meta_entry = detect_test_type(selected_run_name, df)
+
+    # Manual override from sidebar
+    if manual_test_type == "Constant Frequency":
+        is_constant_freq_test = True
+        detection_badge = "🟡 **Manual override → Constant**"
+    elif manual_test_type == "Frequency Sweep":
+        is_constant_freq_test = False
+        detection_badge = "🟡 **Manual override → Sweep**"
+    else:
+        is_constant_freq_test = detected_type != "sweep"
+        method_label = {
+            "freq_set_hz_column": "📊 `freq_set_hz` column",
+            "metadata":          "📋 metadata file",
+            "regex":             "🔤 folder-name regex",
+            "user_regex":        "🏷️ user regex pattern",
+            "unknown":           "❓ unknown (defaulting to constant)",
+        }.get(detection_method, detection_method)
+        detection_badge = (
+            f"{'🟢' if detected_type != 'unknown' else '🟠'} "
+            f"Detected: **{detected_type}** via {method_label}"
+        )
+
+    st.markdown(detection_badge)
+
+    # Show metadata info if available
+    if meta_entry:
+        with st.expander("📋 Test Metadata", expanded=False):
+            for k, v in meta_entry.items():
+                st.write(f"**{k}:** {v}")
 
     if is_constant_freq_test:
         # ====================================================================
         # CONSTANT FREQUENCY TEST
         # ====================================================================
         st.subheader("📊 Constant Frequency Test Analysis")
-        
-        # Get frequency from folder name or use manual override
-        sweep_spec = parse_sweep_spec_from_name(selected_run_name)
-        default_freq = (
-            sweep_spec.get("freq_center", DEFAULT_CONSTANT_FREQUENCY_HZ)
-            if sweep_spec
-            else DEFAULT_CONSTANT_FREQUENCY_HZ
-        )
-        
-        # Manual frequency override
-        col1, col2 = st.columns(2)
-        with col1:
+
+        # Determine default frequency: metadata → config fallback
+        default_freq = DEFAULT_CONSTANT_FREQUENCY_HZ
+        if meta_entry and meta_entry.get("frequency_hz"):
+            default_freq = float(meta_entry["frequency_hz"])
+
+        # Options row: frequency + histogram bins
+        opt1, opt2 = st.columns(2)
+        with opt1:
             manual_freq = st.number_input(
                 "📈 Frequency (Hz)",
-                value=default_freq,
+                value=float(default_freq),
                 min_value=0.1,
                 step=10.0,
-                help="Override auto-detected frequency"
+                help="Override auto-detected frequency",
+                key="const_freq_input",
             )
-        with col2:
-            st.write("")  # Spacer
+        with opt2:
+            hist_bins = st.number_input(
+                "📊 Histogram bins",
+                value=30,
+                min_value=5,
+                max_value=200,
+                step=5,
+                key="hist_bins_input",
+            )
 
         # Prepare data
         try:
@@ -256,24 +445,45 @@ try:
                 df,
                 time_col=time_col,
                 signal_col=signal_col,
-                frequency_hz=manual_freq,
-                parse_time=False,  # Don't re-parse elapsed seconds
+                frequency_hz=float(manual_freq),
+                parse_time=False,
                 drop_na=drop_na_toggle,
             )
         except Exception as e:
             st.error(f"❌ Failed to prepare constant frequency data: {e}")
             st.stop()
 
-        # Show boxplot + histogram
-        col1, col2 = st.columns(2)
+        # ── 1) LARGE TIME SERIES (full width) ──
+        try:
+            fig_ts = plot_time_series(
+                const_freq_df,
+                x_col=time_col,
+                y_col=signal_col,
+                title=f"{selected_run_name} — Flow vs Time",
+                mode=plot_mode,
+                marker_size=marker_size,
+                opacity=marker_opacity,
+            )
+            st.plotly_chart(fig_ts, use_container_width=True)
 
-        with col1:
+            if export_html_toggle:
+                try:
+                    path = export_html(fig_ts, f"{selected_run_name}_time_series.html")
+                    st.success(f"✅ Exported: {path.name}")
+                except Exception as e:
+                    st.error(f"❌ Export failed: {e}")
+        except Exception as e:
+            st.error(f"❌ Time series plot failed: {e}")
+
+        # ── 2) BOXPLOT + HISTOGRAM (side-by-side) ──
+        col_left, col_right = st.columns(2)
+
+        with col_left:
             try:
                 fig_box = plot_constant_frequency_boxplot(
                     const_freq_df,
-                    x_col="Time_Window",
                     y_col=signal_col,
-                    title=f"{selected_run_name} — Flow by Time Window",
+                    title=f"Flow @ {manual_freq:g} Hz",
                 )
                 st.plotly_chart(fig_box, use_container_width=True)
 
@@ -286,11 +496,12 @@ try:
             except Exception as e:
                 st.error(f"❌ Boxplot failed: {e}")
 
-        with col2:
+        with col_right:
             try:
                 fig_hist = plot_flow_histogram(
                     const_freq_df,
-                    value_col=signal_col,
+                    y_col=signal_col,
+                    nbins=int(hist_bins),
                     title=f"{selected_run_name} — Flow Distribution",
                 )
                 st.plotly_chart(fig_hist, use_container_width=True)
@@ -304,12 +515,13 @@ try:
             except Exception as e:
                 st.error(f"❌ Histogram failed: {e}")
 
-        # Summary stats
-        with st.expander("📋 Summary Statistics", expanded=False):
-            st.write(f"**Mean:** {const_freq_df[signal_col].mean():.4f} µL/min")
-            st.write(f"**Std Dev:** {const_freq_df[signal_col].std():.4f} µL/min")
-            st.write(f"**Min:** {const_freq_df[signal_col].min():.4f} µL/min")
-            st.write(f"**Max:** {const_freq_df[signal_col].max():.4f} µL/min")
+        # ── 3) SUMMARY STATS ──
+        with st.expander("📋 Summary Statistics", expanded=True):
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("Mean", f"{const_freq_df[signal_col].mean():.2f} µL/min")
+            s2.metric("Std Dev", f"{const_freq_df[signal_col].std():.2f} µL/min")
+            s3.metric("Min", f"{const_freq_df[signal_col].min():.2f} µL/min")
+            s4.metric("Max", f"{const_freq_df[signal_col].max():.2f} µL/min")
 
     else:
         # ====================================================================
@@ -317,21 +529,37 @@ try:
         # ====================================================================
         st.subheader("📈 Frequency Sweep Test Analysis")
         
-        # Binning options
+        # Parse sweep specification from folder name
+        sweep_spec = parse_sweep_spec_from_name(selected_run_name)
+        if sweep_spec:
+            st.caption(f"🔄 Sweep: {sweep_spec}")
+        else:
+            st.warning("⚠️ Could not parse sweep parameters from folder name. Frequency mapping will use the `freq_set_hz` column if available, or elapsed time as a proxy.")
+
+        # Binning & display options
         col1, col2 = st.columns(2)
         with col1:
-            bin_hz = st.number_input(
+            bin_hz = st.slider(
                 "📊 Frequency bin width (Hz)",
-                value=PLOT_BIN_WIDTH_HZ,
                 min_value=0.5,
-                step=1.0,
+                max_value=100.0,
+                value=float(PLOT_BIN_WIDTH_HZ),
+                step=0.5,
+                key="bin_hz_slider",
+                help="Width of each frequency bin for the binned plot. "
+                     "Smaller = more detail but noisier. Larger = smoother.",
             )
         with col2:
-            max_points = st.number_input(
+            max_points = st.slider(
                 "Max points to plot",
-                value=MAX_POINTS_DEFAULT,
-                min_value=100,
-                step=1000,
+                min_value=1000,
+                max_value=500000,
+                value=int(MAX_POINTS_DEFAULT),
+                step=5000,
+                key="max_points_slider",
+                help="Limit the number of data points sent to the browser. "
+                     "Lower values = faster rendering. The full dataset is "
+                     "still used for binned statistics.",
             )
 
         # Prepare data: time series, sweep analysis
@@ -352,6 +580,9 @@ try:
                 ts_df,
                 time_col=time_col,
                 signal_col=signal_col,
+                spec=sweep_spec,
+                parse_time=(time_format == "absolute_timestamp"),
+                full_df=df,
             )
         except Exception as e:
             st.error(f"❌ Failed to prepare sweep data: {e}")
@@ -368,6 +599,9 @@ try:
                     x_col=time_col,
                     y_col=signal_col,
                     title=f"{selected_run_name} — Flow vs Time",
+                    mode=plot_mode,
+                    marker_size=marker_size,
+                    opacity=marker_opacity,
                 )
                 st.plotly_chart(fig_ts, use_container_width=True)
 
@@ -385,8 +619,8 @@ try:
 
         # FREQUENCY ANALYSIS TAB
         with tab_freq:
-            # All points plot
-            pts_df = sweep_df.head(max_points)
+            # All points plot (capped to max_points for browser performance)
+            pts_df = sweep_df.head(int(max_points))
 
             try:
                 fig_pts = plot_sweep_all_points(
@@ -394,7 +628,10 @@ try:
                     x_col="Frequency",
                     y_col=signal_col,
                     color_col="Sweep",
-                    title=f"{selected_run_name} — All Points",
+                    title=f"{selected_run_name} — All Points ({len(pts_df):,} of {len(sweep_df):,})",
+                    mode=plot_mode if plot_mode != "lines" else "markers",
+                    marker_size=marker_size,
+                    opacity=marker_opacity,
                 )
                 st.plotly_chart(fig_pts, use_container_width=True)
 
@@ -417,29 +654,31 @@ try:
                 )
             except Exception as e:
                 st.error(f"❌ Binning failed: {e}")
-                st.stop()
+                binned = None
 
-            try:
-                fig_bin = plot_sweep_binned(
-                    binned,
-                    x_col="freq_center",
-                    y_col="mean",
-                    std_col="std",
-                    title=f"{selected_run_name} — Binned Mean ± Std",
-                )
-                st.plotly_chart(fig_bin, use_container_width=True)
+            if binned is not None:
+                try:
+                    fig_bin = plot_sweep_binned(
+                        binned,
+                        x_col="freq_center",
+                        y_col="mean",
+                        std_col="std",
+                        title=f"{selected_run_name} — Binned Mean ± Std (Δf = {bin_hz:g} Hz)",
+                        marker_size=marker_size,
+                    )
+                    st.plotly_chart(fig_bin, use_container_width=True)
 
-                if export_html_toggle:
-                    try:
-                        path = export_html(fig_bin, f"{selected_run_name}_sweep_binned.html")
-                        st.success(f"✅ Exported: {path.name}")
-                    except Exception as e:
-                        st.error(f"❌ Export failed: {e}")
-            except Exception as e:
-                st.error(f"❌ Binned plot failed: {e}")
+                    if export_html_toggle:
+                        try:
+                            path = export_html(fig_bin, f"{selected_run_name}_sweep_binned.html")
+                            st.success(f"✅ Exported: {path.name}")
+                        except Exception as e:
+                            st.error(f"❌ Export failed: {e}")
+                except Exception as e:
+                    st.error(f"❌ Binned plot failed: {e}")
 
-            with st.expander("📋 Binned Data Table", expanded=False):
-                st.dataframe(binned, use_container_width=True)
+                with st.expander("📋 Binned Data Table", expanded=False):
+                    st.dataframe(binned, use_container_width=True)
 
 except Exception as e:
     st.error(f"❌ **CRITICAL ERROR:** {str(e)}")

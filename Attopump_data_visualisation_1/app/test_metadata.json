@@ -1,0 +1,420 @@
+{
+  "_description": "Metadata for all AttoPump test folders. Used by the app to determine test type when freq_set_hz column is absent. Edit this file to add new tests or correct misclassified ones.",
+  "_detection_priority": [
+    "1. Check CSV for freq_set_hz column (1 unique value = constant, >1 = sweep)",
+    "2. Look up folder name in this metadata file",
+    "3. Try to parse folder name with regex patterns",
+    "4. Fall back to manual override in the UI"
+  ],
+  "_naming_conventions": {
+    "constant_frequency": "YYYYMMDD-HHMM-PUMP-YYYYMMDD-N  (e.g. 20260302-1244-PUMP-20260227-4)",
+    "frequency_sweep": "YYYYMMDD-HHMM-<startHz>_<endHz>H_Hz_<duration>_seconds  (e.g. 20260302-1037-1Hz_1500H_Hz_500_seconds)"
+  },
+
+  "tests": {
+    "20260206_162936_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260209_094827_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260209_095236_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260209_105256_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260209_105654_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "unknown",
+      "note": "Empty folder - no CSVs."
+    },
+    "20260209_105702_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260209_114950_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260209_115400_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260209_131853_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260209_134104_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260209_134630_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260209_155019_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260209_155558_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260209_160038_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260210_161757_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260210_162328_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260210_172417_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260210_173626_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260210_174100_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260212_103203_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "note": "Has merged.csv with freq_set_hz=[500]. Misleading folder name - was actually constant 500Hz."
+    },
+    "20260212_103307_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260212_114526_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260212_115706_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260212_120152_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260212_120610_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260212_154228_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260212_154639_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260212_164015_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260212_164036_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260212_164049_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260212_164237_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260212_164258_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260213_104450_1x_Sweep_1Hz-1kHz": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260213_104946_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "unknown",
+      "note": "Empty folder - no CSVs."
+    },
+    "20260213_104958_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260213_111452_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260213_112134_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260213_112616_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260213_124428_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260213_124606_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260213_144302_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260213_145341_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260213_150856_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+    "20260213_151351_10x_Sweep_1Hz-1kHz_with_500Hz_breaks": {
+      "type": "sweep",
+      "note": "Has merged.csv with freq_set_hz. Auto-detected."
+    },
+
+    "20260224-1725-Bar3": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 3 - Niels",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "500Hz, constant frequency constant voltage, 10 minutes long test. To verify it could work."
+    },
+    "20260224-1735-Bar2": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 2 - Niels",
+      "voltage": 2.5,
+      "result": "FAILURE",
+      "author": "OS",
+      "note": "500Hz, constant frequency constant voltage, 10 minutes long test. To verify it could work."
+    },
+    "20260226-1148-Bar1": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 1 - Niels",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Manual, constant frequency = 500 Hz"
+    },
+    "20260226-1401-Bar4": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 4 - Niels",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Manual, constant frequency = 500 Hz"
+    },
+    "20260226-1619-Bar5": {
+      "type": "constant",
+      "frequency_hz": 990,
+      "pump": "Pump 5 - Niels",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Manual, constant frequency = 990 Hz. No CSV data."
+    },
+    "20260226-1643-Bar5": {
+      "type": "constant",
+      "frequency_hz": 990,
+      "pump": "Pump 5 - Niels",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Manual, constant frequency = 990 Hz"
+    },
+    "20260226-1730-Bar6": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 6 - Niels",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Manual, constant frequency = 500 Hz"
+    },
+    "20260227-1604-600Hz_1100H_Hz_500_seconds": {
+      "type": "sweep",
+      "sweep_start_hz": 600,
+      "sweep_end_hz": 1100,
+      "sweep_duration_s": 500,
+      "pump": "Pump 270226-1",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Sweep. 600Hz to 1100Hz. Sweep duration 500 seconds. Long test."
+    },
+    "20260227-1702-PUMP-270226-1702": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 270226-1",
+      "voltage": 2.5,
+      "result": "FAILURE",
+      "author": "OS",
+      "note": "Manual, constant frequency = 500Hz"
+    },
+    "20260227-1716-PUMP-270226-1716": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 270226-1",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Manual, constant frequency = 500Hz"
+    },
+    "20260227-1740-1Hz_1500H_Hz_500_seconds": {
+      "type": "sweep",
+      "sweep_start_hz": 1,
+      "sweep_end_hz": 1500,
+      "sweep_duration_s": 500,
+      "pump": "Pump 270226-2",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Sweep. 1Hz to 1500Hz. Sweep duration 500 seconds. Long test."
+    },
+    "20260227-1820-PUMP-20260227-2": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 270226-2",
+      "voltage": 2.5,
+      "result": "FAILURE",
+      "author": "OS",
+      "note": "Manual, constant frequency = 500Hz"
+    },
+    "20260227-1832-PUMP-20260227-2": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 270226-2",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Manual, constant frequency = 500Hz"
+    },
+    "20260227-1850-1Hz_1500H_Hz_500_seconds": {
+      "type": "sweep",
+      "sweep_start_hz": 1,
+      "sweep_end_hz": 1500,
+      "sweep_duration_s": 500,
+      "pump": "Pump 270226-3",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Sweep. 1Hz to 1500Hz. Sweep duration 500 seconds. Long test."
+    },
+    "20260227-1930-PUMP-20260227-3": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 270226-3",
+      "voltage": 2.5,
+      "result": "FAILURE",
+      "author": "OS",
+      "note": "Manual, constant frequency = 500Hz"
+    },
+    "20260227-1941-PUMP-20260227-3": {
+      "type": "constant",
+      "frequency_hz": 1000,
+      "pump": "Pump 270226-3",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Manual, constant frequency = 1000Hz"
+    },
+    "20260227-1956-PUMP-20260227-3": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 270226-3",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Manual, constant frequency = 500Hz initially, but after flow rate became approx 0 uL/min, frequency was increased until bubbles purged."
+    },
+    "20260302-1005-1Hz_1500H_Hz_500_seconds": {
+      "type": "sweep",
+      "sweep_start_hz": 1,
+      "sweep_end_hz": 1500,
+      "sweep_duration_s": 500,
+      "pump": "Pump 270226-4",
+      "voltage": 2.5,
+      "result": "FAILURE",
+      "author": "OS",
+      "note": "Sweep. 1Hz to 1500Hz. Sweep duration 500 seconds. 30 mins long."
+    },
+    "20260302-1037-1Hz_1500H_Hz_500_seconds": {
+      "type": "sweep",
+      "sweep_start_hz": 1,
+      "sweep_end_hz": 1500,
+      "sweep_duration_s": 500,
+      "pump": "Pump 270226-4",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Sweep. 1Hz to 1500Hz. Sweep duration 500 seconds. 30 mins long."
+    },
+    "20260302-1244-PUMP-20260227-4": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 270226-4",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "OS",
+      "note": "Manual, constant frequency = 500Hz"
+    },
+    "Constant500Hz_Pump2_Niels_20260225_145652_0001": {
+      "type": "constant",
+      "frequency_hz": 500,
+      "pump": "Pump 2 - Niels",
+      "voltage": 2.5,
+      "result": "UNKNOWN",
+      "author": "JT",
+      "note": "Manual, Constant freq"
+    },
+    "Constant830_Pump2_Niels_20260225_160054_0001": {
+      "type": "constant",
+      "frequency_hz": 830,
+      "pump": "Pump 2 - Niels",
+      "voltage": 3.1,
+      "result": "UNKNOWN",
+      "author": "JT",
+      "note": "Manual, Constant freq"
+    },
+    "Test2_Constant300Hz_Pump3_Niels_25022026_1348_20260225_135806_0001": {
+      "type": "constant",
+      "frequency_hz": 300,
+      "pump": "Pump 3 - Niels",
+      "voltage": 2.5,
+      "result": "SUCCESS",
+      "author": "JT",
+      "note": "Manual, Constant freq"
+    },
+    "Test_Pump3_Niels_25022026_1348_20260225_135001_0001": {
+      "type": "constant",
+      "frequency_hz": null,
+      "pump": "Pump 3 - Niels",
+      "voltage": 2.5,
+      "result": "UNKNOWN",
+      "author": "JT",
+      "note": "Manual, Various freq. Frequency unknown - multiple frequencies used manually."
+    }
+  }
+}

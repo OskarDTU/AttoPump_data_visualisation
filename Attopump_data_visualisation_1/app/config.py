@@ -14,10 +14,29 @@ DATA_EXPORT_DIR.mkdir(exist_ok=True)
 # ============================================================================
 # REGEX PATTERNS
 # ============================================================================
-SWEEP_PATTERN = re.compile(
-    r"(?P<start>\d+(?:\.\d+)?)Hz_(?P<end>\d+(?:\.\d+)?)Hz_(?P<dur>\d+(?:\.\d+)?)s",
-    re.IGNORECASE,
-)
+# Multiple patterns tried in order to handle naming variations:
+#   20260302-1037-1Hz_1500H_Hz_500_seconds  → 1 Hz to 1500 Hz, 500 s
+#   20260206_162936_10x_Sweep_1Hz-1kHz_...  → 1 Hz to 1000 Hz (kHz)
+#   10Hz_500Hz_60s                          → 10 Hz to 500 Hz, 60 s
+SWEEP_PATTERNS = [
+    # Standard: 10Hz_500Hz_60s
+    re.compile(
+        r"(?P<start>\d+(?:\.\d+)?)\s*Hz[_-]+(?P<end>\d+(?:\.\d+)?)\s*Hz[_-]+(?P<dur>\d+(?:\.\d+)?)\s*s\b",
+        re.IGNORECASE,
+    ),
+    # With H_Hz typo and _seconds: 1Hz_1500H_Hz_500_seconds
+    re.compile(
+        r"(?P<start>\d+(?:\.\d+)?)\s*Hz[_-]+(?P<end>\d+(?:\.\d+)?)\s*H_Hz[_-]+(?P<dur>\d+(?:\.\d+)?)_?(?:seconds?|s)\b",
+        re.IGNORECASE,
+    ),
+    # With kHz: 1Hz-1kHz (no duration in name)
+    re.compile(
+        r"(?P<start>\d+(?:\.\d+)?)\s*Hz[_-]+(?P<end>\d+(?:\.\d+)?)\s*kHz",
+        re.IGNORECASE,
+    ),
+]
+# Keep single SWEEP_PATTERN for backward compat (uses first pattern)
+SWEEP_PATTERN = SWEEP_PATTERNS[0]
 
 # ============================================================================
 # DATA COLUMN GUESSING

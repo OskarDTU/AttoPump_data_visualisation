@@ -11,29 +11,58 @@ import plotly.graph_objects as go
 from .config import PLOT_HEIGHT
 
 
+# ============================================================================
+# HELPERS
+# ============================================================================
+
+def _flow_label(col: str) -> str:
+    return f"{col} (µL/min)" if "flow" in col.lower() else col
+
+
+def _time_label(col: str) -> str:
+    return "Time (seconds)" if col.lower() in ["t_s", "elapsed_s", "t"] else "Time"
+
+
 def plot_time_series(
     df: pd.DataFrame,
     x_col: str,
     y_col: str,
     title: str = "",
     height: int = PLOT_HEIGHT,
+    mode: str = "lines",
+    marker_size: int = 4,
+    opacity: float = 1.0,
 ) -> go.Figure:
-    """Create time series line plot with proper axis labels."""
-    fig = px.line(
-        df,
-        x=x_col,
-        y=y_col,
-        title=title,
-        labels={
-            x_col: "Time (seconds)" if x_col.lower() in ['t_s', 'elapsed_s'] else "Time",
-            y_col: f"{y_col} (µL/min)" if "flow" in y_col.lower() else y_col
-        },
+    """Create time series plot (line, scatter, or both).
+
+    Parameters
+    ----------
+    mode : str
+        ``"lines"`` | ``"markers"`` | ``"lines+markers"``
+    marker_size : int
+        Point diameter in pixels.
+    opacity : float
+        Marker / line opacity 0-1.
+    """
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scattergl(
+            x=df[x_col],
+            y=df[y_col],
+            mode=mode,
+            marker=dict(size=marker_size, opacity=opacity),
+            line=dict(width=2),
+            name=y_col,
+        )
     )
     fig.update_layout(
+        title=title,
         height=height,
         margin=dict(l=20, r=20, t=40, b=20),
         hovermode="x unified",
         font=dict(size=12),
+        xaxis_title=_time_label(x_col),
+        yaxis_title=_flow_label(y_col),
     )
     fig.update_xaxes(title_font=dict(size=12))
     fig.update_yaxes(title_font=dict(size=12))
@@ -42,61 +71,55 @@ def plot_time_series(
 
 def plot_constant_frequency_boxplot(
     df: pd.DataFrame,
-    x_col: str = "Time_Window",
     y_col: str = "flow",
     title: str = "",
     height: int = PLOT_HEIGHT,
 ) -> go.Figure:
-    """Create boxplot for constant frequency test showing distribution over time windows.
-    
-    Displays quartiles, median, and outliers to show spread and confidence intervals.
-    """
-    fig = px.box(
-        df,
-        x=x_col,
-        y=y_col,
-        title=title,
-        labels={
-            x_col: "Time Window (seconds)",
-            y_col: f"{y_col} (µL/min)" if "flow" in y_col.lower() else y_col
-        },
-        points="outliers",  # Show outliers as individual points
+    """Single boxplot showing overall flow-rate distribution."""
+    fig = go.Figure()
+    fig.add_trace(
+        go.Box(
+            y=df[y_col].dropna(),
+            name=y_col,
+            boxmean="sd",
+            boxpoints="outliers",
+            marker_color="#636EFA",
+            line_color="#636EFA",
+        )
     )
     fig.update_layout(
+        title=title,
         height=height,
         margin=dict(l=20, r=20, t=40, b=20),
-        hovermode="x unified",
-        showlegend=True,
+        yaxis_title=_flow_label(y_col),
         font=dict(size=12),
+        showlegend=False,
     )
-    fig.update_xaxes(title_font=dict(size=12))
     fig.update_yaxes(title_font=dict(size=12))
-    fig.update_traces(boxmean="sd")  # Show mean and std dev
     return fig
 
 
 def plot_flow_histogram(
     df: pd.DataFrame,
     y_col: str = "flow",
+    nbins: int = 30,
     title: str = "",
     height: int = PLOT_HEIGHT,
 ) -> go.Figure:
-    """Create histogram of flow rates for constant frequency test."""
+    """Histogram of flow rates for constant frequency test."""
     fig = px.histogram(
         df,
         x=y_col,
-        nbins=30,
+        nbins=nbins,
         title=title,
-        labels={
-            y_col: f"{y_col} (µL/min)" if "flow" in y_col.lower() else y_col
-        },
+        labels={y_col: _flow_label(y_col)},
     )
     fig.update_layout(
         height=height,
         margin=dict(l=20, r=20, t=40, b=20),
         hovermode="x",
         font=dict(size=12),
-        xaxis_title=f"{y_col} (µL/min)" if "flow" in y_col.lower() else y_col,
+        xaxis_title=_flow_label(y_col),
         yaxis_title="Frequency (count)",
     )
     fig.update_xaxes(title_font=dict(size=12))
@@ -111,8 +134,21 @@ def plot_sweep_all_points(
     color_col: str | None = "Sweep",
     title: str = "",
     height: int = PLOT_HEIGHT,
+    mode: str = "markers",
+    marker_size: int = 4,
+    opacity: float = 0.7,
 ) -> go.Figure:
-    """Create scatter plot of all sweep points with sweep coloring and legend."""
+    """Scatter / line plot of all sweep data points.
+
+    Parameters
+    ----------
+    mode : str
+        ``"markers"`` | ``"lines"`` | ``"lines+markers"``
+    marker_size : int
+        Diameter of each point in pixels.
+    opacity : float
+        Marker opacity 0-1.
+    """
     if color_col and color_col in df.columns:
         fig = px.scatter(
             df,
@@ -123,25 +159,29 @@ def plot_sweep_all_points(
             title=title,
             labels={
                 x_col: "Frequency (Hz)",
-                y_col: f"{y_col} (µL/min)" if "flow" in y_col.lower() else y_col,
-                color_col: "Sweep #"
+                y_col: _flow_label(y_col),
+                color_col: "Sweep #",
             },
+            render_mode="webgl",
         )
-        # Update legend to show sweep numbers clearly
-        fig.update_traces(marker=dict(size=6, opacity=0.7))
+        fig.update_traces(
+            marker=dict(size=marker_size, opacity=opacity),
+            mode=mode,
+        )
     else:
         fig = px.scatter(
             df,
             x=x_col,
             y=y_col,
             title=title,
-            labels={
-                x_col: "Frequency (Hz)",
-                y_col: f"{y_col} (µL/min)" if "flow" in y_col.lower() else y_col
-            },
+            labels={x_col: "Frequency (Hz)", y_col: _flow_label(y_col)},
+            render_mode="webgl",
         )
-        fig.update_traces(marker=dict(size=6))
-    
+        fig.update_traces(
+            marker=dict(size=marker_size, opacity=opacity),
+            mode=mode,
+        )
+
     fig.update_layout(
         height=height,
         margin=dict(l=20, r=20, t=40, b=20),
@@ -161,28 +201,27 @@ def plot_sweep_binned(
     std_col: str = "std",
     title: str = "",
     height: int = PLOT_HEIGHT,
+    mode: str = "lines+markers",
+    marker_size: int = 6,
 ) -> go.Figure:
-    """Create binned sweep plot with mean ± std band."""
+    """Binned sweep plot with mean ± std band."""
     fig = go.Figure()
-    
-    # Mean line
+
     fig.add_trace(
         go.Scatter(
             x=binned_df[x_col],
             y=binned_df[y_col],
-            mode="lines+markers",
+            mode=mode,
             name="Mean",
             line=dict(color="blue", width=2),
-            marker=dict(size=6),
+            marker=dict(size=marker_size),
         )
     )
-    
-    # Std error band
+
     if std_col in binned_df.columns:
-        y_upper = binned_df[y_col] + binned_df[std_col]
-        y_lower = binned_df[y_col] - binned_df[std_col]
-        
-        # Upper bound
+        y_upper = binned_df[y_col] + binned_df[std_col].fillna(0)
+        y_lower = binned_df[y_col] - binned_df[std_col].fillna(0)
+
         fig.add_trace(
             go.Scatter(
                 x=binned_df[x_col],
@@ -193,8 +232,6 @@ def plot_sweep_binned(
                 hoverinfo="skip",
             )
         )
-        
-        # Lower bound with fill
         fig.add_trace(
             go.Scatter(
                 x=binned_df[x_col],
@@ -207,19 +244,18 @@ def plot_sweep_binned(
                 hoverinfo="skip",
             )
         )
-    
+
     fig.update_layout(
         title=title,
         height=height,
         margin=dict(l=20, r=20, t=40, b=20),
         xaxis_title="Frequency (Hz)",
-        yaxis_title=f"{y_col} (µL/min)" if "flow" in y_col.lower() else y_col,
+        yaxis_title=_flow_label(y_col),
         hovermode="x unified",
         font=dict(size=12),
     )
     fig.update_xaxes(title_font=dict(size=12))
     fig.update_yaxes(title_font=dict(size=12))
-    
     return fig
 
 
