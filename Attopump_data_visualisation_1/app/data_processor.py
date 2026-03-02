@@ -331,16 +331,34 @@ def prepare_sweep_data(
         column is used directly for frequency mapping – much more
         accurate than computing it from elapsed time.
     """
+    # ── Include freq_set_hz early so it gets filtered with everything else ──
+    source_df = full_df if full_df is not None else df
+    has_freq_col = "freq_set_hz" in source_df.columns
+
+    if has_freq_col:
+        # Attach freq_set_hz to the input df *before* prepare_time_series_data
+        # so that the same rows are dropped/deduplicated together.
+        work_df = df.copy()
+        work_df["_freq_set_hz"] = pd.to_numeric(
+            source_df["freq_set_hz"], errors="coerce"
+        ).values[: len(work_df)]
+    else:
+        work_df = df
+
     # Start with time series preparation
-    sweep_df = prepare_time_series_data(df, time_col, signal_col, parse_time, drop_na)
+    sweep_df = prepare_time_series_data(work_df, time_col, signal_col, parse_time, drop_na)
     sweep_df = sweep_df.copy()
+
+    # Early exit if empty
+    if sweep_df.empty:
+        raise ValueError("No data remaining after time-series preparation.")
 
     # Calculate elapsed seconds depending on time format
     time_format = detect_time_format(df, time_col)
 
     if time_format == 'elapsed_seconds':
         sweep_df["Elapsed_s"] = pd.to_numeric(sweep_df[time_col], errors="coerce")
-    elif np.issubdtype(sweep_df[time_col].dtype, np.datetime64):
+    elif not sweep_df.empty and np.issubdtype(sweep_df[time_col].dtype, np.datetime64):
         sweep_df["Elapsed_s"] = (
             sweep_df[time_col] - sweep_df[time_col].iloc[0]
         ).dt.total_seconds()
@@ -353,14 +371,10 @@ def prepare_sweep_data(
         raise ValueError("No finite elapsed-time values after cleaning.")
 
     # ── Frequency column ────────────────────────────────────────────
-    # Priority 1: use the real freq_set_hz column from the original CSV
-    source_df = full_df if full_df is not None else df
-    if "freq_set_hz" in source_df.columns:
-        # Align by index length (the time-series prep may have dropped rows)
-        freq_series = pd.to_numeric(
-            source_df["freq_set_hz"], errors="coerce"
-        ).reindex(sweep_df.index)
-        sweep_df["Frequency"] = freq_series.values
+    # Priority 1: use the real freq_set_hz column (co-filtered above)
+    if has_freq_col and "_freq_set_hz" in sweep_df.columns:
+        sweep_df["Frequency"] = sweep_df["_freq_set_hz"]
+        sweep_df = sweep_df.drop(columns=["_freq_set_hz"])
         # Drop rows with missing frequency
         sweep_df = sweep_df.dropna(subset=["Frequency"]).copy()
     elif spec is not None and spec.duration_s > 0:
@@ -370,9 +384,11 @@ def prepare_sweep_data(
         sweep_df["Frequency"] = spec.start_hz + (
             spec.end_hz - spec.start_hz
         ) * phase
+        sweep_df = sweep_df.drop(columns=["_freq_set_hz"], errors="ignore")
     else:
         # Priority 3: elapsed time as proxy
         sweep_df["Frequency"] = sweep_df["Elapsed_s"]
+        sweep_df = sweep_df.drop(columns=["_freq_set_hz"], errors="ignore")
 
     # ── Sweep cycle index ───────────────────────────────────────────
     if spec is not None and spec.duration_s > 0:

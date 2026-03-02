@@ -1,16 +1,54 @@
-"""Streamlit entry point for AttoPump data visualization.
+"""Streamlit multipage entry point for AttoPump data visualization.
 
-This wrapper properly configures the Python path and runs the app.
-Run with: uv run streamlit run streamlit_app.py
+Run with:
+    ./run_app.sh          (from repo root)
+    uv run streamlit run streamlit_app.py   (manual)
+
+Pages:
+    📊 Single Test Explorer  – one test at a time
+    🔬 Comprehensive Analysis – multi-test comparison & EDA
 """
+
+from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-# Add the project directory to sys.path so Attopump_data_visualisation_1 can be imported
-project_dir = Path(__file__).parent / "Attopump_data_visualisation_1"
-if str(project_dir) not in sys.path:
-    sys.path.insert(0, str(project_dir))
+# ------------------------------------------------------------------
+# Ensure both the project dir and its src/ are importable.
+# ------------------------------------------------------------------
+_PROJECT = Path(__file__).resolve().parent / "Attopump_data_visualisation_1"
+for _p in [str(_PROJECT / "src"), str(_PROJECT)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-# Now the app can import from Attopump_data_visualisation_1
-from app.app import *  # noqa: F401, F403
+import streamlit as st
+
+
+# ------------------------------------------------------------------
+# Page wrappers — import at call time so relative imports work.
+# ------------------------------------------------------------------
+
+def _run_explorer():
+    from app.app import main
+    main()
+
+
+def _run_analysis():
+    from app.analysis import main
+    main()
+
+
+# ------------------------------------------------------------------
+# Navigation
+# ------------------------------------------------------------------
+
+st.set_page_config(page_title="AttoPump Data Visualization", layout="wide")
+
+pg = st.navigation(
+    [
+        st.Page(_run_explorer, title="Single Test Explorer", icon="📊", default=True),
+        st.Page(_run_analysis, title="Comprehensive Analysis", icon="🔬"),
+    ]
+)
+pg.run()
