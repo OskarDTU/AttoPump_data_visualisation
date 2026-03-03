@@ -160,6 +160,29 @@ def main():
                 key="show_error_bars_checkbox",
             )
 
+            # ── Y-AXIS RANGE ───────────────────────────────────────────
+            st.divider()
+            st.header("📏 Y-Axis Range")
+            y_axis_auto = st.checkbox(
+                "Auto-range y-axis",
+                value=True,
+                help="When checked, the y-axis scales to fit the data. "
+                     "Uncheck to set a fixed range.",
+                key="y_axis_auto_checkbox",
+            )
+            if y_axis_auto:
+                y_range = None
+            else:
+                y_min = st.number_input(
+                    "Y min", value=0.0, step=0.1,
+                    key="y_axis_min_input",
+                )
+                y_max = st.number_input(
+                    "Y max", value=100.0, step=0.1,
+                    key="y_axis_max_input",
+                )
+                y_range = (float(y_min), float(y_max))
+
             # ── TEST TYPE OVERRIDE ──────────────────────────────────────
             st.divider()
             st.header("🔧 Test Type Override")
@@ -504,6 +527,7 @@ def main():
                     mode=plot_mode,
                     marker_size=marker_size,
                     opacity=marker_opacity,
+                    y_range=y_range,
                 )
                 st.plotly_chart(fig_ts, use_container_width=True)
 
@@ -643,6 +667,7 @@ def main():
                         mode=plot_mode,
                         marker_size=marker_size,
                         opacity=marker_opacity,
+                        y_range=y_range,
                     )
                     st.plotly_chart(fig_ts, use_container_width=True)
 
@@ -673,6 +698,7 @@ def main():
                         mode=plot_mode if plot_mode != "lines" else "markers",
                         marker_size=marker_size,
                         opacity=marker_opacity,
+                        y_range=y_range,
                     )
                     st.plotly_chart(fig_pts, use_container_width=True)
 
@@ -708,6 +734,7 @@ def main():
                             mode=plot_mode,
                             marker_size=marker_size,
                             show_error_bars=show_error_bars,
+                            y_range=y_range,
                         )
                         st.plotly_chart(fig_bin, use_container_width=True)
 
@@ -722,6 +749,33 @@ def main():
 
                     with st.expander("📋 Binned Data Table", expanded=False):
                         st.dataframe(binned, use_container_width=True)
+
+                # ── Per-sweep average summary table ──────────────────────
+                import pandas as pd
+                if "Sweep" in sweep_df.columns and signal_col in sweep_df.columns:
+                    sweep_ids = sorted(sweep_df["Sweep"].unique())
+                    if len(sweep_ids) > 0:
+                        rows = []
+                        for sw in sweep_ids:
+                            sub = sweep_df.loc[sweep_df["Sweep"] == sw, signal_col].dropna()
+                            if sub.empty:
+                                continue
+                            rows.append({
+                                "Sweep": f"Sweep {int(sw) + 1}",
+                                "Mean (µL/min)": round(float(sub.mean()), 3),
+                                "Std (µL/min)": round(float(sub.std()), 3),
+                                "Min (µL/min)": round(float(sub.min()), 3),
+                                "Max (µL/min)": round(float(sub.max()), 3),
+                                "Points": len(sub),
+                            })
+                        if rows:
+                            summary_df = pd.DataFrame(rows)
+                            st.subheader("📊 Per-Sweep Summary")
+                            st.dataframe(
+                                summary_df,
+                                use_container_width=True,
+                                hide_index=True,
+                            )
 
     except Exception as e:
         st.error(f"❌ **CRITICAL ERROR:** {str(e)}")

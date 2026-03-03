@@ -160,6 +160,7 @@ def plot_combined_overlay(
         xaxis_title="Frequency (Hz)",
         yaxis_title="Flow (µL/min)",
         hovermode="x unified",
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -273,6 +274,7 @@ def plot_global_average(
         xaxis_title="Frequency (Hz)",
         yaxis_title="Flow (µL/min)",
         hovermode="x unified",
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -318,6 +320,7 @@ def plot_all_raw_points(
         xaxis_title="Frequency (Hz)",
         yaxis_title=_flow_label(signal_col),
         hovermode="closest",
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -364,6 +367,7 @@ def plot_relative_comparison(
         xaxis_title="Frequency (Hz)",
         yaxis_title="Relative Flow (%)",
         hovermode="x unified",
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -402,6 +406,7 @@ def plot_combined_boxplots(
         title=title,
         height=height,
         yaxis_title=_flow_label(signal_col),
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
         showlegend=False,
@@ -444,6 +449,7 @@ def plot_combined_histograms(
         barmode="overlay",
         xaxis_title=_flow_label(signal_col),
         yaxis_title="Count",
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -541,6 +547,7 @@ def plot_std_vs_mean(
 
     fig.update_layout(
         height=height,
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -666,6 +673,7 @@ def plot_stability_cloud(
         xaxis_title="Mean Flow (µL/min)",
         yaxis_title="Std Dev (µL/min)",
         hovermode="closest",
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -733,6 +741,7 @@ def plot_correlation_heatmap(
     fig.update_layout(
         title=title,
         height=height,
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -846,6 +855,7 @@ def plot_per_test_sweeps(
         xaxis_title="Frequency (Hz)",
         yaxis_title=_flow_label(signal_col),
         hovermode="x unified",
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )

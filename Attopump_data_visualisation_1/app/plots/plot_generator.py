@@ -59,6 +59,7 @@ def plot_time_series(
     mode: str = "lines",
     marker_size: int = 4,
     opacity: float = 1.0,
+    y_range: tuple[float, float] | None = None,
 ) -> go.Figure:
     """Create time series plot (line, scatter, or both).
 
@@ -70,6 +71,8 @@ def plot_time_series(
         Point diameter in pixels.
     opacity : float
         Marker / line opacity 0-1.
+    y_range : tuple or None
+        Fixed ``(ymin, ymax)`` for the y-axis.  ``None`` = auto-range.
     """
     fig = go.Figure()
     fig.add_trace(
@@ -87,10 +90,13 @@ def plot_time_series(
         height=height,
         margin=dict(l=20, r=20, t=40, b=20),
         hovermode="x unified",
+        dragmode="zoom",
         font=dict(size=12),
         xaxis_title=_time_label(x_col),
         yaxis_title=_flow_label(y_col),
     )
+    if y_range is not None:
+        fig.update_yaxes(range=list(y_range))
     fig.update_xaxes(title_font=dict(size=12))
     fig.update_yaxes(title_font=dict(size=12))
     return fig
@@ -119,6 +125,7 @@ def plot_constant_frequency_boxplot(
         height=height,
         margin=dict(l=20, r=20, t=40, b=20),
         yaxis_title=_flow_label(y_col),
+        dragmode="zoom",
         font=dict(size=12),
         showlegend=False,
     )
@@ -145,6 +152,7 @@ def plot_flow_histogram(
         height=height,
         margin=dict(l=20, r=20, t=40, b=20),
         hovermode="x",
+        dragmode="zoom",
         font=dict(size=12),
         xaxis_title=_flow_label(y_col),
         yaxis_title="Frequency (count)",
@@ -152,6 +160,10 @@ def plot_flow_histogram(
     fig.update_xaxes(title_font=dict(size=12))
     fig.update_yaxes(title_font=dict(size=12))
     return fig
+
+
+# Qualitative palette for sweep colouring (10 distinct colours).
+_SWEEP_PALETTE = px.colors.qualitative.Plotly
 
 
 def plot_sweep_all_points(
@@ -164,8 +176,12 @@ def plot_sweep_all_points(
     mode: str = "markers",
     marker_size: int = 4,
     opacity: float = 0.7,
+    y_range: tuple[float, float] | None = None,
 ) -> go.Figure:
     """Scatter / line plot of all sweep data points.
+
+    Each sweep cycle gets its own colour and a legend entry labelled
+    ``Sweep 1``, ``Sweep 2``, etc.
 
     Parameters
     ----------
@@ -175,47 +191,51 @@ def plot_sweep_all_points(
         Diameter of each point in pixels.
     opacity : float
         Marker opacity 0-1.
+    y_range : tuple or None
+        Fixed ``(ymin, ymax)`` for the y-axis.  ``None`` = auto-range.
     """
+    fig = go.Figure()
+
     if color_col and color_col in df.columns:
-        fig = px.scatter(
-            df,
-            x=x_col,
-            y=y_col,
-            color=color_col,
-            color_discrete_sequence=px.colors.qualitative.Set3,
-            title=title,
-            labels={
-                x_col: "Frequency (Hz)",
-                y_col: _flow_label(y_col),
-                color_col: "Sweep #",
-            },
-            render_mode="webgl",
-        )
-        fig.update_traces(
-            marker=dict(size=marker_size, opacity=opacity),
-            mode=mode,
-        )
+        sweep_ids = sorted(df[color_col].unique())
+        for i, sw in enumerate(sweep_ids):
+            sub = df[df[color_col] == sw]
+            colour = _SWEEP_PALETTE[i % len(_SWEEP_PALETTE)]
+            fig.add_trace(
+                go.Scattergl(
+                    x=sub[x_col],
+                    y=sub[y_col],
+                    mode=mode,
+                    name=f"Sweep {int(sw) + 1}",
+                    marker=dict(size=marker_size, opacity=opacity, color=colour),
+                    line=dict(width=1.5, color=colour),
+                )
+            )
     else:
-        fig = px.scatter(
-            df,
-            x=x_col,
-            y=y_col,
-            title=title,
-            labels={x_col: "Frequency (Hz)", y_col: _flow_label(y_col)},
-            render_mode="webgl",
-        )
-        fig.update_traces(
-            marker=dict(size=marker_size, opacity=opacity),
-            mode=mode,
+        fig.add_trace(
+            go.Scattergl(
+                x=df[x_col],
+                y=df[y_col],
+                mode=mode,
+                name=y_col,
+                marker=dict(size=marker_size, opacity=opacity),
+                line=dict(width=1.5),
+            )
         )
 
     fig.update_layout(
+        title=title,
         height=height,
         margin=dict(l=20, r=20, t=40, b=20),
         hovermode="closest",
+        dragmode="zoom",
         font=dict(size=12),
         showlegend=True,
+        xaxis_title="Frequency (Hz)",
+        yaxis_title=_flow_label(y_col),
     )
+    if y_range is not None:
+        fig.update_yaxes(range=list(y_range))
     fig.update_xaxes(title_font=dict(size=12))
     fig.update_yaxes(title_font=dict(size=12))
     return fig
@@ -231,13 +251,16 @@ def plot_sweep_binned(
     mode: str = "lines+markers",
     marker_size: int = 6,
     show_error_bars: bool = True,
+    y_range: tuple[float, float] | None = None,
 ) -> go.Figure:
-    """Binned sweep plot with optional mean ± std band.
+    """Binned sweep plot with optional mean +/- std band.
 
     Parameters
     ----------
     show_error_bars : bool
-        When *True* (default), draw a ±1 std shaded band around the mean.
+        When *True* (default), draw a +/-1 std shaded band around the mean.
+    y_range : tuple or None
+        Fixed ``(ymin, ymax)`` for the y-axis.  ``None`` = auto-range.
     """
     fig = go.Figure()
 
@@ -286,8 +309,11 @@ def plot_sweep_binned(
         xaxis_title="Frequency (Hz)",
         yaxis_title=_flow_label(y_col),
         hovermode="x unified",
+        dragmode="zoom",
         font=dict(size=12),
     )
+    if y_range is not None:
+        fig.update_yaxes(range=list(y_range))
     fig.update_xaxes(title_font=dict(size=12))
     fig.update_yaxes(title_font=dict(size=12))
     return fig

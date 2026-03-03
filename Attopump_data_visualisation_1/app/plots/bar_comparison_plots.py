@@ -139,6 +139,7 @@ def plot_bar_sweep_overlay(
         xaxis_title="Frequency (Hz)",
         yaxis_title="Flow (µL/min)",
         hovermode="x unified",
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -181,6 +182,7 @@ def plot_bar_sweep_relative(
         xaxis_title="Frequency (Hz)",
         yaxis_title="Relative Flow (%)",
         hovermode="x unified",
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -220,6 +222,7 @@ def plot_bar_constant_boxplots(
         title="Constant-Frequency Flow – Bar Comparison",
         height=height,
         yaxis_title=_flow_label(signal_col),
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
         boxmode="group",
@@ -261,6 +264,7 @@ def plot_bar_constant_aggregated(
         title="Aggregated Constant-Frequency Flow per Bar",
         height=height,
         yaxis_title=_flow_label(signal_col),
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )
@@ -304,6 +308,7 @@ def plot_bar_constant_histograms(
         barmode="overlay",
         xaxis_title=_flow_label(signal_col),
         yaxis_title="Count",
+        dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
     )
