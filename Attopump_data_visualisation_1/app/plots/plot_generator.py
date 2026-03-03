@@ -1,4 +1,29 @@
-"""Plot generation with Plotly (interactive HTML output)."""
+"""Core Plotly figure generation for single-test visualisation.
+
+This module produces interactive Plotly figures consumed by the
+**Single Test Explorer** page.  Each public function takes a cleaned
+``pd.DataFrame`` (prepared by ``data_processor``) plus display options
+and returns a ``go.Figure`` ready to embed with ``st.plotly_chart``.
+
+Figure catalogue
+----------------
+- ``plot_time_series``              — flow vs time (line / scatter / both).
+- ``plot_constant_frequency_boxplot`` — overall flow-rate distribution box.
+- ``plot_flow_histogram``           — histogram of flow rates.
+- ``plot_sweep_all_points``         — raw scatter coloured by sweep cycle.
+- ``plot_sweep_binned``             — binned mean ± std band.
+- ``export_html``                   — save any figure to a standalone HTML file.
+
+Inputs
+------
+- ``pd.DataFrame`` with at least the time column and one signal column.
+- Plot-appearance options (mode, marker size, opacity, height).
+
+Outputs
+-------
+- ``plotly.graph_objects.Figure`` instances.
+- ``pathlib.Path`` for exported HTML files.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +33,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from .config import PLOT_HEIGHT
+from ..data.config import PLOT_HEIGHT
 
 
 # ============================================================================
@@ -16,10 +41,12 @@ from .config import PLOT_HEIGHT
 # ============================================================================
 
 def _flow_label(col: str) -> str:
+    """Return a human-readable axis label for a flow column."""
     return f"{col} (µL/min)" if "flow" in col.lower() else col
 
 
 def _time_label(col: str) -> str:
+    """Return a human-readable axis label for a time column."""
     return "Time (seconds)" if col.lower() in ["t_s", "elapsed_s", "t"] else "Time"
 
 
@@ -281,7 +308,7 @@ def export_html(
         Path to exported HTML file
     """
     if export_dir is None:
-        from .config import DATA_EXPORT_DIR
+        from ..data.config import DATA_EXPORT_DIR
         export_dir = DATA_EXPORT_DIR
     else:
         export_dir = Path(export_dir)

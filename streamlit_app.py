@@ -5,8 +5,9 @@ Run with:
     uv run streamlit run streamlit_app.py   (manual)
 
 Pages:
-    📊 Single Test Explorer  – one test at a time
-    🔬 Comprehensive Analysis – multi-test comparison & EDA
+    📊 Single Test Explorer    – one test at a time
+    🔬 Comprehensive Analysis  – multi-test comparison & EDA
+    📦 Bar Comparison          – compare groups of pumps (bars & shipments)
 """
 
 from __future__ import annotations
@@ -30,12 +31,17 @@ import streamlit as st
 # ------------------------------------------------------------------
 
 def _run_explorer():
-    from app.app import main
+    from app.pages.explorer import main
     main()
 
 
 def _run_analysis():
-    from app.analysis import main
+    from app.pages.analysis import main
+    main()
+
+
+def _run_bar_comparison():
+    from app.pages.bar_comparison import main
     main()
 
 
@@ -49,6 +55,7 @@ pg = st.navigation(
     [
         st.Page(_run_explorer, title="Single Test Explorer", icon="📊", default=True),
         st.Page(_run_analysis, title="Comprehensive Analysis", icon="🔬"),
+        st.Page(_run_bar_comparison, title="Bar Comparison", icon="📦"),
     ]
 )
 pg.run()

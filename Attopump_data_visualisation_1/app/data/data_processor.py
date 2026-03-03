@@ -1,4 +1,39 @@
-"""Data processing: loading, cleaning, and transforming CSV data."""
+"""Data processing: loading, cleaning, and transforming CSV data.
+
+This is the core data-engineering module.  It sits between the raw CSV
+files (loaded by ``io_local``) and the plotting layer (``app.plots.*``).
+Every function here takes a ``pd.DataFrame`` (or folder name) and returns
+either a transformed ``pd.DataFrame`` or metadata.
+
+Responsibilities
+----------------
+1. **Test-type detection** — determine whether a test folder is a
+   *constant-frequency* or *frequency-sweep* test using a four-level
+   priority system (``freq_set_hz`` column → metadata JSON → regex →
+   default).
+2. **Column guessing** — auto-detect the time column and signal
+   (flow / pressure / temperature) columns from a DataFrame.
+3. **Time-format detection** — distinguish elapsed-seconds (merged.csv)
+   from absolute timestamps (Flowboard raw data).
+4. **Data preparation** — produce clean, plot-ready DataFrames for
+   time-series, frequency-sweep, and constant-frequency views.
+5. **Frequency binning** — aggregate sweep data into equal-width
+   frequency bins with mean ± std statistics.
+6. **Metadata / pattern persistence** — read and write
+   ``test_metadata.json`` (per-folder overrides) and
+   ``user_patterns.json`` (custom sweep-detection regexes).
+
+Inputs
+------
+- ``pd.DataFrame`` loaded from CSV (lowercase columns, via ``io_local``).
+- Folder names (``str``) for regex / metadata lookups.
+
+Outputs
+-------
+- Cleaned ``pd.DataFrame`` objects ready for plotting.
+- ``(test_type, detection_method, metadata_entry)`` tuples.
+- ``SweepSpec`` dataclass instances.
+"""
 
 from __future__ import annotations
 

@@ -1,11 +1,36 @@
 """
 Local OneDrive (synced folder) access utilities.
 
-Mode 1 strategy:
-- Treat OneDrive as a normal local folder path.
-- Provide helpers to list run folders and pick the most relevant CSV.
+This module provides low-level file-system helpers for discovering and
+reading test-data CSV files stored in a locally-synced OneDrive folder.
+It is intentionally **UI-agnostic** so it can be reused by Streamlit
+pages, tests, and CLI scripts without importing Streamlit.
 
-Keep this module UI-agnostic so it can be reused by Streamlit, tests, and CLI.
+Strategy
+--------
+OneDrive is treated as a regular local directory tree.  Each immediate
+subfolder under the user-supplied root represents one *test run*.  Inside
+each test-run folder the module locates the best CSV to analyse.
+
+Key functions
+-------------
+- ``normalize_root(path)`` → validated ``Path`` (handles macOS escaped spaces).
+- ``list_run_dirs(root)``  → sorted list of test-run ``Path`` objects.
+- ``find_csvs(run_dir)``   → all non-empty CSVs in a run folder.
+- ``pick_best_csv(run_dir)`` → single ``CsvPick`` (prefers merged.csv > trimmed_*.csv).
+- ``read_csv_preview(csv, nrows)`` → small ``pd.DataFrame`` for UI preview.
+- ``read_csv_full(csv)``   → complete ``pd.DataFrame`` with auto-delimiter detection.
+
+Inputs
+------
+- A local folder path (``str`` or ``Path``) pointing at the OneDrive root.
+- CSV files in either **comma-delimited** (merged.csv) or **semicolon-
+  delimited** (Flowboard raw export) format.
+
+Outputs
+-------
+- ``Path`` objects for directories / files.
+- ``pd.DataFrame`` with **lowercase column names** (always normalised).
 """
 
 from __future__ import annotations

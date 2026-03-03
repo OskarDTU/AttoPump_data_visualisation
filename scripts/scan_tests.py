@@ -1,4 +1,33 @@
-"""Scan all test folders and report which have freq_set_hz column."""
+"""Scan all test folders and report which contain a ``freq_set_hz`` column.
+
+This is a standalone diagnostic script (not part of the Streamlit app)
+that walks every subfolder under a hard-coded OneDrive test-data root,
+opens each CSV file, and checks whether the ``freq_set_hz`` column is
+present.  The output is printed to stdout.
+
+Purpose
+-------
+Quickly audit which test folders will be auto-detected as
+*frequency-sweep* tests (having ``freq_set_hz``) vs
+*constant-frequency* tests (lacking the column) so the developer can
+populate ``test_metadata.json`` for edge cases.
+
+Input
+-----
+- ``ROOT`` constant (hard-coded OneDrive path to ``All_tests/``).
+- CSV files inside each test subfolder.
+
+Output (stdout)
+---------------
+- Total folder count.
+- Section 1: folders **with** ``freq_set_hz`` — annotated as CONSTANT
+  (1 unique value) or SWEEP (N unique values).
+- Section 2: folders **without** ``freq_set_hz`` — lists available CSVs.
+
+Usage
+-----
+    python scripts/scan_tests.py
+"""
 import sys
 from pathlib import Path
 import pandas as pd

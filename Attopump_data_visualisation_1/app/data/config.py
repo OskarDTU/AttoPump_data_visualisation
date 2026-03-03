@@ -1,4 +1,25 @@
-"""Configuration and constants for AttoPump data visualization."""
+"""Configuration and constants for AttoPump data visualization.
+
+This module is the single source of truth for all tuneable parameters,
+regex patterns, column-name heuristics, and dataclasses shared across the
+application.  Nothing in this file performs I/O or computation — it only
+*defines* values consumed by other modules.
+
+Sections
+--------
+- **Paths & defaults** — export directory, app root.
+- **Regex patterns** — compiled patterns to detect frequency-sweep test
+  folders from their naming convention.
+- **Data column guessing** — ordered candidate lists used by
+  ``data_processor.guess_time_column`` / ``guess_signal_column``.
+- **Plotting defaults** — chart height, bin width, point caps.
+- **Data processing** — NaN handling, duplicate strategy.
+- **Constant-frequency tests** — default frequency for older tests.
+- **SweepSpec dataclass** — lightweight container for parsed sweep
+  parameters (start Hz, end Hz, duration).
+
+No inputs / outputs — this module is imported for its constant values.
+"""
 
 import re
 from dataclasses import dataclass
@@ -94,7 +115,20 @@ DEFAULT_CONSTANT_FREQUENCY_HZ = 500.0  # All tests before cutoff are 500Hz
 # ============================================================================
 @dataclass(frozen=True)
 class SweepSpec:
-    """Parsed frequency sweep specification."""
+    """Parsed frequency sweep specification.
+
+    Extracted from a test-folder name by :func:`data_processor.parse_sweep_spec_from_name`.
+
+    Attributes
+    ----------
+    start_hz : float
+        Lower bound of the sweep range (e.g. 1.0).
+    end_hz : float
+        Upper bound of the sweep range (e.g. 1500.0).
+    duration_s : float
+        Duration of one complete sweep cycle in seconds.
+        May be 0.0 if the naming convention omits this value.
+    """
     start_hz: float
     end_hz: float
     duration_s: float

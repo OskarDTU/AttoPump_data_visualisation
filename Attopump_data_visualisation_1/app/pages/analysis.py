@@ -1,11 +1,41 @@
 """Comprehensive Analysis page — multi-test comparison and EDA.
 
+This page lets the user select **two or more** test folders and
+perform cross-test comparison, statistical analysis, and
+best-operating-region detection.  All selected tests are loaded in
+parallel, classified as sweep or constant-frequency, binned, and
+then rendered across seven analysis tabs.
+
 Inspired by:
   - 03-06-2025-1338_flow_and_pressure_analysis.py
   - 27-05-2025-0041_configuration_comparison.py
 
-Allows selecting multiple test folders and performing cross-test
-comparison, statistical analysis, and best-operating-region detection.
+User workflow
+-------------
+1. **Sidebar → Data Source** — same root folder as the Explorer page.
+2. **Sidebar → Analysis Settings** — bin widths, max raw points.
+3. **Sidebar → Plot Appearance** — mode, marker size, opacity,
+   error-bar toggle.
+4. **Sidebar → Stability Cloud** — thresholds for high-flow /
+   high-stability detection.
+5. **Main area** — multi-select tests, then explore 7 tabs:
+   - 📊 Individual per-test sweeps
+   - 🔀 Combined overlay (+ relative)
+   - 📏 Global average curve
+   - ⚡ All raw data points
+   - 📦 EDA (boxplots, histograms, correlation heatmap, summary table)
+   - 📐 Std vs Mean scatter
+   - 🎯 Best operating region finder (stability cloud)
+
+Inputs
+------
+- Local folder path + multi-selected test folders.
+- CSV files auto-picked by ``io_local.pick_best_csv``.
+
+Outputs
+-------
+- Interactive Plotly charts and ``pd.DataFrame`` summary tables.
+- Optional HTML exports to ``app/data/exports/``.
 """
 
 from __future__ import annotations
@@ -16,14 +46,14 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from Attopump_data_visualisation_1.io.onedrive_local import (
+from ..data.io_local import (
     list_run_dirs,
     normalize_root,
     pick_best_csv,
     read_csv_full,
 )
-from .config import PLOT_BIN_WIDTH_HZ, PLOT_HEIGHT
-from .data_processor import (
+from ..data.config import PLOT_BIN_WIDTH_HZ, PLOT_HEIGHT
+from ..data.data_processor import (
     bin_by_frequency,
     detect_test_type,
     detect_time_format,
@@ -33,7 +63,7 @@ from .data_processor import (
     prepare_sweep_data,
     prepare_time_series_data,
 )
-from .analysis_plots import (
+from ..plots.analysis_plots import (
     build_summary_table,
     plot_all_raw_points,
     plot_combined_boxplots,
@@ -46,7 +76,7 @@ from .analysis_plots import (
     plot_stability_cloud,
     plot_std_vs_mean,
 )
-from .plot_generator import export_html
+from ..plots.plot_generator import export_html
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -55,7 +85,7 @@ from .plot_generator import export_html
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_csv_cached(csv_path_str: str) -> pd.DataFrame:
-    """Load a CSV with caching (key = path string)."""
+    """Load a CSV with Streamlit caching (5-min TTL, keyed by path string)."""
     return read_csv_full(csv_path_str)
 
 
@@ -357,7 +387,7 @@ def main() -> None:  # noqa: C901  — unavoidable complexity for a full page
                     with st.expander(
                         f"📈 {name}", expanded=(len(binned_data) <= 3)
                     ):
-                        from .plot_generator import plot_sweep_binned
+                        from ..plots.plot_generator import plot_sweep_binned
 
                         binned = binned_data[name]
                         fig_b = plot_sweep_binned(

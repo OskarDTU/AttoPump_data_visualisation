@@ -1,29 +1,56 @@
-"""Streamlit app for AttoPump data visualization.
+"""Single Test Explorer page — visualise one test at a time.
 
-Run with: streamlit run streamlit_app.py
+This is the default landing page of the application.  The user points
+the app at a local folder of test-run sub-directories, selects a run,
+and the page auto-detects whether the run is a *constant-frequency* or
+*frequency-sweep* test.  It then renders the appropriate charts.
 
-Modular architecture:
-  - config.py: Constants and patterns
-  - data_processor.py: Data loading, cleaning, sweep/constant frequency analysis
-  - plot_generator.py: Plotly figure generation and HTML export
+User workflow
+-------------
+1. **Sidebar → Data Source** — paste a OneDrive-synced root folder path.
+2. **Sidebar → Options** — toggle auto-pick CSV, datetime parsing, NaN
+   dropping, HTML export, and plot appearance (line/scatter, marker
+   size, opacity).
+3. **Sidebar → Test Type Override** — manually force constant-frequency
+   or sweep detection when auto-detection is wrong.
+4. **Sidebar → Naming Conventions** — register individual folders in
+   ``test_metadata.json`` or add user-defined regex patterns.
+5. **Main area** — select a run folder + CSV, then view:
+   - *Constant-frequency*: time series, boxplot, histogram, summary
+     metrics.
+   - *Sweep*: time-series tab, frequency-analysis tab (all points +
+     binned mean ± std).
+
+Inputs
+------
+- Local folder path (via sidebar text input).
+- CSV files discovered by ``io_local.pick_best_csv``.
+
+Outputs
+-------
+- Interactive Plotly charts rendered in Streamlit.
+- Optional HTML exports to ``app/data/exports/``.
+
+Run with: ``streamlit run streamlit_app.py`` (this module is loaded
+lazily by the root entry point).
 """
 
 import streamlit as st
 import traceback
 
-from Attopump_data_visualisation_1.io.onedrive_local import (
+from ..data.io_local import (
     list_run_dirs,
     normalize_root,
     pick_best_csv,
     read_csv_full,
     read_csv_preview,
 )
-from .config import (
+from ..data.config import (
     DEFAULT_CONSTANT_FREQUENCY_HZ,
     MAX_POINTS_DEFAULT,
     PLOT_BIN_WIDTH_HZ,
 )
-from .data_processor import (
+from ..data.data_processor import (
     bin_by_frequency,
     detect_test_type,
     detect_time_format,
@@ -40,7 +67,7 @@ from .data_processor import (
     save_metadata_entry,
     save_user_patterns,
 )
-from .plot_generator import (
+from ..plots.plot_generator import (
     export_html,
     plot_constant_frequency_boxplot,
     plot_flow_histogram,
@@ -55,7 +82,12 @@ from .plot_generator import (
 
 
 def main():
-    """Entry point for the Single Test Explorer page."""
+    """Entry point for the Single Test Explorer page.
+
+    Renders the full sidebar configuration, folder/CSV selection,
+    test-type detection badge, and appropriate charts.  Called by the
+    root ``streamlit_app.py`` via ``st.navigation``.
+    """
     try:
         # ========================================================================
         # SESSION STATE: Path Memory

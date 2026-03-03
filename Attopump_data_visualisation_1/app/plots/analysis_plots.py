@@ -1,6 +1,42 @@
 """Plot generation for multi-test comprehensive analysis.
 
-Inspired by 03-06-2025-1338_flow_and_pressure_analysis.py.
+This module powers the **Comprehensive Analysis** page.  Unlike
+``plot_generator`` (single-test figures), every function here accepts
+*dictionaries* of DataFrames keyed by test name, enabling cross-test
+comparison and statistical analysis.
+
+Inspired by:
+  - 03-06-2025-1338_flow_and_pressure_analysis.py
+  - 27-05-2025-0041_configuration_comparison.py
+
+Figure catalogue
+----------------
+1.  ``plot_combined_overlay``     — overlay binned mean±std from N tests.
+2.  ``plot_global_average``       — inter-test average curve on a common
+                                   frequency grid.
+3.  ``plot_all_raw_points``       — scatter of every data point, coloured
+                                   by test.
+4.  ``plot_relative_comparison``  — each test normalised to 0–100 %.
+5.  ``plot_combined_boxplots``    — side-by-side box-and-whisker plots.
+6.  ``plot_combined_histograms``  — overlaid semi-transparent histograms.
+7.  ``plot_std_vs_mean``          — variability scatter with linear fit.
+8.  ``plot_stability_cloud``      — best operating region finder.
+9.  ``plot_correlation_heatmap``  — Pearson correlation between binned
+                                   mean-flow curves.
+10. ``build_summary_table``       — summary statistics DataFrame.
+11. ``plot_per_test_sweeps``      — binned per-sweep breakdown for one test.
+
+Inputs
+------
+- ``dict[str, pd.DataFrame]`` of binned data (``test_binned``).
+- ``dict[str, pd.DataFrame]`` of raw/time-series data (``test_raw``).
+- Display options (mode, marker size, thresholds, …).
+
+Outputs
+-------
+- ``plotly.graph_objects.Figure`` instances.
+- ``pd.DataFrame`` for summary tables and best-region results.
+
 All functions produce Plotly figures for interactive use in Streamlit.
 """
 
@@ -11,7 +47,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from .config import PLOT_HEIGHT
+from ..data.config import PLOT_HEIGHT
 
 # ---------------------------------------------------------------------------
 # Color palette (enough for many tests)
@@ -51,6 +87,7 @@ def _color_to_rgba(color: str, alpha: float = 0.2) -> str:
 
 
 def _flow_label(col: str) -> str:
+    """Return a human-readable axis label for a flow column."""
     return f"{col} (µL/min)" if "flow" in col.lower() else col
 
 
