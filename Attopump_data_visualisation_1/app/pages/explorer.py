@@ -152,6 +152,13 @@ def main():
                 step=0.05,
                 key="marker_opacity_slider",
             )
+            show_error_bars = st.checkbox(
+                "Show ±std error bands",
+                value=True,
+                help="Toggle the ±1 standard-deviation shaded band on "
+                     "frequency-binned plots.",
+                key="show_error_bars_checkbox",
+            )
 
             # ── TEST TYPE OVERRIDE ──────────────────────────────────────
             st.divider()
@@ -700,6 +707,7 @@ def main():
                             title=f"{selected_run_name} — Binned Mean ± Std (Δf = {bin_hz:g} Hz)",
                             mode=plot_mode,
                             marker_size=marker_size,
+                            show_error_bars=show_error_bars,
                         )
                         st.plotly_chart(fig_bin, use_container_width=True)
 

@@ -38,6 +38,7 @@ Outputs
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -238,8 +239,14 @@ def parse_sweep_spec_from_name(run_name: str) -> SweepSpec | None:
       - 10Hz_500Hz_60s             → 10 to 500 Hz, 60 s
       - 1Hz_1500H_Hz_500_seconds   → 1 to 1500 Hz, 500 s
       - 1Hz-1kHz                   → 1 to 1000 Hz (kHz multiplier), duration unknown
+
+    Also parses a repetition count if present, e.g. ``10x_Sweep`` → 10.
     """
     from .config import SWEEP_PATTERNS
+    
+    # ── Parse repetition count (e.g. "10x", "5X") ──
+    rep_match = re.search(r"(\d+)\s*[xX]", run_name)
+    num_repeats = int(rep_match.group(1)) if rep_match else 1
     
     for pattern in SWEEP_PATTERNS:
         match = pattern.search(run_name)
@@ -260,6 +267,7 @@ def parse_sweep_spec_from_name(run_name: str) -> SweepSpec | None:
                 start_hz=start_hz,
                 end_hz=end_hz,
                 duration_s=duration_s,
+                num_repeats=max(1, num_repeats),
             )
     
     return None
@@ -356,7 +364,17 @@ def prepare_sweep_data(
     - Sweep: sweep cycle index (if spec provided and duration > 0)
     - Frequency: from ``freq_set_hz`` column if available, else computed
 
-    Handles both elapsed seconds (merged.csv) and absolute timestamps (Flowboard).
+    Handles both elapsed seconds (merged.csv) and absolute timestamps
+    (Flowboard).
+
+    Frequency assignment priority
+    -----------------------------
+    1. ``freq_set_hz`` column present in *full_df* → use it directly.
+    2. ``spec.duration_s > 0`` → compute from elapsed time + spec.
+    3. ``spec`` has valid start/end but no duration → estimate sweep
+       period from the total elapsed time and ``spec.num_repeats``.
+    4. Fall-back: elapsed time as a proxy (labels the axis correctly
+       but values are seconds, not Hz).
 
     Parameters
     ----------
@@ -366,32 +384,38 @@ def prepare_sweep_data(
         column is used directly for frequency mapping – much more
         accurate than computing it from elapsed time.
     """
-    # ── Include freq_set_hz early so it gets filtered with everything else ──
+    # ── Determine data source and whether freq_set_hz exists ────────
     source_df = full_df if full_df is not None else df
     has_freq_col = "freq_set_hz" in source_df.columns
 
+    # ── Build working DataFrame keeping freq_set_hz aligned ─────────
+    # We select columns from *source_df* (not df) so that freq_set_hz
+    # stays row-aligned through dedup / dropna filtering.
+    cols_to_keep = [time_col, signal_col]
     if has_freq_col:
-        # Attach freq_set_hz to the input df *before* prepare_time_series_data
-        # so that the same rows are dropped/deduplicated together.
-        work_df = df.copy()
-        work_df["_freq_set_hz"] = pd.to_numeric(
-            source_df["freq_set_hz"], errors="coerce"
-        ).values[: len(work_df)]
-    else:
-        work_df = df
+        cols_to_keep.append("freq_set_hz")
 
-    # Start with time series preparation
-    sweep_df = prepare_time_series_data(work_df, time_col, signal_col, parse_time, drop_na)
-    sweep_df = sweep_df.copy()
+    sweep_df = source_df[cols_to_keep].copy()
+    sweep_df = sweep_df.reset_index(drop=True)
 
-    # Early exit if empty
+    # ── Time parsing (absolute timestamps only) ────────────────────
+    time_format = detect_time_format(source_df, time_col)
+    if parse_time and time_format == "absolute_timestamp":
+        sweep_df[time_col] = pd.to_datetime(
+            sweep_df[time_col], errors=TIME_PARSE_ERROR_HANDLING
+        )
+
+    # ── De-duplicate & drop NaN ────────────────────────────────────
+    sweep_df = sweep_df.drop_duplicates(subset=[time_col], keep=DUPLICATE_HANDLING)
+    if drop_na:
+        sweep_df = sweep_df.dropna(subset=[time_col, signal_col])
+    sweep_df = sweep_df.reset_index(drop=True)
+
     if sweep_df.empty:
         raise ValueError("No data remaining after time-series preparation.")
 
-    # Calculate elapsed seconds depending on time format
-    time_format = detect_time_format(df, time_col)
-
-    if time_format == 'elapsed_seconds':
+    # ── Elapsed seconds ────────────────────────────────────────────
+    if time_format == "elapsed_seconds":
         sweep_df["Elapsed_s"] = pd.to_numeric(sweep_df[time_col], errors="coerce")
     elif not sweep_df.empty and np.issubdtype(sweep_df[time_col].dtype, np.datetime64):
         sweep_df["Elapsed_s"] = (
@@ -400,30 +424,51 @@ def prepare_sweep_data(
     else:
         sweep_df["Elapsed_s"] = pd.to_numeric(sweep_df[time_col], errors="coerce")
 
-    # Drop rows where elapsed time is NaN / inf
     sweep_df = sweep_df[np.isfinite(sweep_df["Elapsed_s"])].copy()
     if sweep_df.empty:
         raise ValueError("No finite elapsed-time values after cleaning.")
 
     # ── Frequency column ────────────────────────────────────────────
-    # Priority 1: use the real freq_set_hz column (co-filtered above)
-    if has_freq_col and "_freq_set_hz" in sweep_df.columns:
-        sweep_df["Frequency"] = sweep_df["_freq_set_hz"]
-        sweep_df = sweep_df.drop(columns=["_freq_set_hz"])
-        # Drop rows with missing frequency
+    # Priority 1: real freq_set_hz column (properly aligned above)
+    if has_freq_col and "freq_set_hz" in sweep_df.columns:
+        sweep_df["Frequency"] = pd.to_numeric(
+            sweep_df["freq_set_hz"], errors="coerce"
+        )
+        sweep_df = sweep_df.drop(columns=["freq_set_hz"])
         sweep_df = sweep_df.dropna(subset=["Frequency"]).copy()
+
     elif spec is not None and spec.duration_s > 0:
-        # Priority 2: compute from sweep spec
+        # Priority 2: compute from sweep spec (known duration)
         sweep_s = float(spec.duration_s)
         phase = (sweep_df["Elapsed_s"] % sweep_s) / sweep_s
         sweep_df["Frequency"] = spec.start_hz + (
             spec.end_hz - spec.start_hz
         ) * phase
-        sweep_df = sweep_df.drop(columns=["_freq_set_hz"], errors="ignore")
+
+    elif spec is not None and spec.start_hz != spec.end_hz:
+        # Priority 3: spec with start/end but unknown duration.
+        # Estimate one sweep period from total elapsed time and the
+        # repetition count parsed from the folder name.
+        total_elapsed = float(
+            sweep_df["Elapsed_s"].max() - sweep_df["Elapsed_s"].min()
+        )
+        if total_elapsed > 0:
+            n_reps = max(1, spec.num_repeats)
+            est_dur = total_elapsed / n_reps
+            elapsed_from_start = sweep_df["Elapsed_s"] - sweep_df["Elapsed_s"].min()
+            phase = (elapsed_from_start % est_dur) / est_dur
+            sweep_df["Frequency"] = spec.start_hz + (
+                spec.end_hz - spec.start_hz
+            ) * phase
+        else:
+            sweep_df["Frequency"] = sweep_df["Elapsed_s"]
+
     else:
-        # Priority 3: elapsed time as proxy
+        # Priority 4: elapsed time as proxy (last resort)
         sweep_df["Frequency"] = sweep_df["Elapsed_s"]
-        sweep_df = sweep_df.drop(columns=["_freq_set_hz"], errors="ignore")
+
+    # Clean up freq_set_hz if still lingering
+    sweep_df = sweep_df.drop(columns=["freq_set_hz"], errors="ignore")
 
     # ── Sweep cycle index ───────────────────────────────────────────
     if spec is not None and spec.duration_s > 0:
@@ -431,6 +476,20 @@ def prepare_sweep_data(
         raw_sweep = sweep_df["Elapsed_s"] / sweep_s
         raw_sweep = raw_sweep.where(np.isfinite(raw_sweep), 0)
         sweep_df["Sweep"] = raw_sweep.astype(int)
+    elif spec is not None and spec.start_hz != spec.end_hz:
+        total_elapsed = float(
+            sweep_df["Elapsed_s"].max() - sweep_df["Elapsed_s"].min()
+        )
+        n_reps = max(1, spec.num_repeats)
+        if total_elapsed > 0 and n_reps > 1:
+            est_dur = total_elapsed / n_reps
+            raw_sweep = (
+                sweep_df["Elapsed_s"] - sweep_df["Elapsed_s"].min()
+            ) / est_dur
+            raw_sweep = raw_sweep.where(np.isfinite(raw_sweep), 0)
+            sweep_df["Sweep"] = raw_sweep.astype(int)
+        else:
+            sweep_df["Sweep"] = 0
     else:
         sweep_df["Sweep"] = 0
 

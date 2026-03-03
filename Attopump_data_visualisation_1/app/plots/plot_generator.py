@@ -230,8 +230,15 @@ def plot_sweep_binned(
     height: int = PLOT_HEIGHT,
     mode: str = "lines+markers",
     marker_size: int = 6,
+    show_error_bars: bool = True,
 ) -> go.Figure:
-    """Binned sweep plot with mean ± std band."""
+    """Binned sweep plot with optional mean ± std band.
+
+    Parameters
+    ----------
+    show_error_bars : bool
+        When *True* (default), draw a ±1 std shaded band around the mean.
+    """
     fig = go.Figure()
 
     fig.add_trace(
@@ -245,7 +252,7 @@ def plot_sweep_binned(
         )
     )
 
-    if std_col in binned_df.columns:
+    if show_error_bars and std_col in binned_df.columns:
         y_upper = binned_df[y_col] + binned_df[std_col].fillna(0)
         y_lower = binned_df[y_col] - binned_df[std_col].fillna(0)
 

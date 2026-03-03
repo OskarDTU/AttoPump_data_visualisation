@@ -128,10 +128,16 @@ class SweepSpec:
     duration_s : float
         Duration of one complete sweep cycle in seconds.
         May be 0.0 if the naming convention omits this value.
+    num_repeats : int
+        Number of sweep repetitions parsed from the folder name
+        (e.g. ``10x`` → 10).  Defaults to 1 when not specified.
     """
     start_hz: float
     end_hz: float
     duration_s: float
+    num_repeats: int = 1
 
     def __str__(self) -> str:
-        return f"{self.start_hz:g}→{self.end_hz:g} Hz, {self.duration_s:g}s"
+        reps = f", {self.num_repeats}×" if self.num_repeats > 1 else ""
+        dur = f", {self.duration_s:g}s" if self.duration_s > 0 else ""
+        return f"{self.start_hz:g}→{self.end_hz:g} Hz{dur}{reps}"

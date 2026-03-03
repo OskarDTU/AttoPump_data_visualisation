@@ -562,6 +562,7 @@ def _render_sweep_analysis(
                         title=f"{name} — Binned (Δf = {S['bin_hz']:g} Hz)",
                         mode=S["plot_mode"],
                         marker_size=S["marker_sz"],
+                        show_error_bars=S["err_bars"],
                     )
                     st.plotly_chart(fig_b, use_container_width=True)
 
@@ -622,6 +623,7 @@ def _render_sweep_analysis(
                 bin_hz=S["avg_bin_hz"],
                 mode=S["plot_mode"],
                 marker_size=S["marker_sz"],
+                show_error_bars=S["err_bars"],
             )
             st.plotly_chart(fig_avg, use_container_width=True)
             _maybe_export(fig_avg, "global_average.html", S)

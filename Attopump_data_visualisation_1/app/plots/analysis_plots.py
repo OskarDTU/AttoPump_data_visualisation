@@ -178,11 +178,17 @@ def plot_global_average(
     height: int = PLOT_HEIGHT,
     mode: str = "lines+markers",
     marker_size: int = 6,
+    show_error_bars: bool = True,
 ) -> go.Figure:
     """Compute and plot the average curve across all tests.
 
     Re-bins every test onto a common frequency grid, then computes
     the inter-test mean ± std at each grid point.
+
+    Parameters
+    ----------
+    show_error_bars : bool
+        When *True* (default), draw a ±1 std shaded band around the mean.
     """
     # Collect all frequency ranges
     all_freqs: list[float] = []
@@ -236,28 +242,30 @@ def plot_global_average(
 
     upper = avg_df["mean"] + avg_df["std"]
     lower = avg_df["mean"] - avg_df["std"]
-    fig.add_trace(
-        go.Scatter(
-            x=avg_df["freq_center"],
-            y=upper,
-            mode="lines",
-            line=dict(width=0),
-            showlegend=False,
-            hoverinfo="skip",
+
+    if show_error_bars:
+        fig.add_trace(
+            go.Scatter(
+                x=avg_df["freq_center"],
+                y=upper,
+                mode="lines",
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo="skip",
+            )
         )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=avg_df["freq_center"],
-            y=lower,
-            mode="lines",
-            line=dict(width=0),
-            fill="tonexty",
-            name="±1 std (inter-test)",
-            fillcolor="rgba(0, 100, 255, 0.2)",
-            hoverinfo="skip",
+        fig.add_trace(
+            go.Scatter(
+                x=avg_df["freq_center"],
+                y=lower,
+                mode="lines",
+                line=dict(width=0),
+                fill="tonexty",
+                name="±1 std (inter-test)",
+                fillcolor="rgba(0, 100, 255, 0.2)",
+                hoverinfo="skip",
+            )
         )
-    )
 
     fig.update_layout(
         title=title,
