@@ -6,8 +6,7 @@ Run with:
 
 Pages:
     📊 Single Test Explorer    – one test at a time
-    🔬 Comprehensive Analysis  – multi-test comparison & EDA
-    📦 Bar Comparison          – compare groups of pumps (bars & shipments)
+    🔬 Comprehensive Analysis  – multi-test / multi-bar comparison & EDA
 """
 
 from __future__ import annotations
@@ -40,11 +39,6 @@ def _run_analysis():
     main()
 
 
-def _run_bar_comparison():
-    from app.pages.bar_comparison import main
-    main()
-
-
 # ------------------------------------------------------------------
 # Navigation
 # ------------------------------------------------------------------
@@ -55,7 +49,6 @@ pg = st.navigation(
     [
         st.Page(_run_explorer, title="Single Test Explorer", icon="📊", default=True),
         st.Page(_run_analysis, title="Comprehensive Analysis", icon="🔬"),
-        st.Page(_run_bar_comparison, title="Bar Comparison", icon="📦"),
     ]
 )
 pg.run()

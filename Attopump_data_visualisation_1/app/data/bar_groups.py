@@ -39,10 +39,23 @@ class Shipment:
 
 
 @dataclass
+class TestGroup:
+    """A named collection of test folders for quick re-comparison.
+
+    Unlike a bar (which represents a physical pump), a test group is an
+    arbitrary set of test folders saved for convenience.
+    """
+    name: str
+    tests: list[str] = field(default_factory=list)
+    description: str = ""
+
+
+@dataclass
 class BarGroupsStore:
-    """Top-level container for all bars and shipments."""
+    """Top-level container for all bars, shipments, and test groups."""
     bars: dict[str, Bar] = field(default_factory=dict)
     shipments: dict[str, Shipment] = field(default_factory=dict)
+    test_groups: dict[str, TestGroup] = field(default_factory=dict)
 
 
 # ─── serialisation helpers ──────────────────────────────────────────────────
@@ -50,11 +63,12 @@ class BarGroupsStore:
 def _store_to_dict(store: BarGroupsStore) -> dict[str, Any]:
     return {
         "_description": (
-            "Bar groups and shipment definitions for AttoPump comparisons. "
-            "Managed by the Bar Comparison page."
+            "Bar groups, shipments, and test groups for AttoPump comparisons. "
+            "Managed by the Comprehensive Analysis page."
         ),
         "bars": {name: asdict(bar) for name, bar in store.bars.items()},
         "shipments": {name: asdict(s) for name, s in store.shipments.items()},
+        "test_groups": {name: asdict(tg) for name, tg in store.test_groups.items()},
     }
 
 
@@ -74,7 +88,14 @@ def _dict_to_store(raw: dict[str, Any]) -> BarGroupsStore:
             recipient=d.get("recipient", ""),
             description=d.get("description", ""),
         )
-    return BarGroupsStore(bars=bars, shipments=shipments)
+    test_groups: dict[str, TestGroup] = {}
+    for name, d in raw.get("test_groups", {}).items():
+        test_groups[name] = TestGroup(
+            name=d.get("name", name),
+            tests=d.get("tests", []),
+            description=d.get("description", ""),
+        )
+    return BarGroupsStore(bars=bars, shipments=shipments, test_groups=test_groups)
 
 
 # ─── public API ─────────────────────────────────────────────────────────────
@@ -203,4 +224,44 @@ def remove_shipment(store: BarGroupsStore, shipment_name: str) -> BarGroupsStore
         The same ``store`` object (mutated in place).
     """
     store.shipments.pop(shipment_name, None)
+    return store
+
+
+# ── Test Group CRUD ─────────────────────────────────────────────────────
+
+def add_test_group(store: BarGroupsStore, tg: TestGroup) -> BarGroupsStore:
+    """Add (or overwrite) a test group in the store.
+
+    Parameters
+    ----------
+    store : BarGroupsStore
+        In-memory store to mutate.
+    tg : TestGroup
+        Test group to insert (keyed by ``tg.name``).
+
+    Returns
+    -------
+    BarGroupsStore
+        The same ``store`` object (mutated in place).
+    """
+    store.test_groups[tg.name] = tg
+    return store
+
+
+def remove_test_group(store: BarGroupsStore, group_name: str) -> BarGroupsStore:
+    """Remove a test group from the store.
+
+    Parameters
+    ----------
+    store : BarGroupsStore
+        In-memory store to mutate.
+    group_name : str
+        Name of the test group to remove.  No-op if it doesn't exist.
+
+    Returns
+    -------
+    BarGroupsStore
+        The same ``store`` object (mutated in place).
+    """
+    store.test_groups.pop(group_name, None)
     return store

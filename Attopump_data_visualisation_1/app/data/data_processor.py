@@ -552,3 +552,81 @@ def prepare_constant_frequency_data(
         out['Time_Window'] = (t_numeric // 1.0).astype(int)
     
     return out
+
+
+# ============================================================================
+# FREQUENCY SLICE EXTRACTION (for mixed-type comparison)
+# ============================================================================
+
+def extract_frequency_slice(
+    sweep_df: pd.DataFrame,
+    target_freq_hz: float,
+    tolerance_hz: float = 5.0,
+    signal_col: str = "flow",
+) -> pd.DataFrame:
+    """Extract data points from a frequency sweep near a target frequency.
+
+    Used to compare sweep-test results with constant-frequency tests by
+    isolating the sweep readings around the constant frequency.
+
+    Parameters
+    ----------
+    sweep_df : pd.DataFrame
+        Sweep DataFrame (must contain a ``Frequency`` column).
+    target_freq_hz : float
+        Centre frequency to extract (e.g. 500.0).
+    tolerance_hz : float
+        Half-width of the extraction window (default ±5 Hz).
+    signal_col : str
+        Signal column name (kept for downstream compatibility).
+
+    Returns
+    -------
+    pd.DataFrame
+        Subset of ``sweep_df`` where Frequency is within
+        ``target_freq_hz ± tolerance_hz``.  Empty DataFrame if no match.
+    """
+    if "Frequency" not in sweep_df.columns:
+        return pd.DataFrame()
+    mask = (
+        (sweep_df["Frequency"] >= target_freq_hz - tolerance_hz)
+        & (sweep_df["Frequency"] <= target_freq_hz + tolerance_hz)
+    )
+    return sweep_df.loc[mask].copy()
+
+
+def detect_constant_frequency(
+    df: pd.DataFrame,
+    run_name: str = "",
+) -> float | None:
+    """Auto-detect the operating frequency of a constant-frequency test.
+
+    Priority:
+      1. ``freq_set_hz`` column with a single unique value.
+      2. ``frequency_hz`` field in ``test_metadata.json``.
+      3. ``DEFAULT_CONSTANT_FREQUENCY_HZ`` from config.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Loaded CSV data.
+    run_name : str
+        Folder name (for metadata lookup).
+
+    Returns
+    -------
+    float or None
+        Detected frequency in Hz.
+    """
+    # Priority 1: freq_set_hz column with single unique value
+    if "freq_set_hz" in df.columns:
+        unique = df["freq_set_hz"].dropna().unique()
+        if len(unique) == 1:
+            return float(unique[0])
+    # Priority 2: metadata file
+    meta = load_test_metadata()
+    entry = meta.get(run_name, {})
+    if entry.get("frequency_hz"):
+        return float(entry["frequency_hz"])
+    # Priority 3: config default
+    return DEFAULT_CONSTANT_FREQUENCY_HZ

@@ -1,46 +1,36 @@
-"""Comprehensive Analysis page — multi-test comparison and EDA.
+"""Unified Comprehensive Analysis page — compare tests, bars, manage groups.
 
-This page lets the user select **two or more** test folders and
-perform cross-test comparison, statistical analysis, and
-best-operating-region detection.  All selected tests are loaded in
-parallel, classified as sweep or constant-frequency, binned, and
-then rendered across seven analysis tabs.
+This page consolidates all multi-test and multi-bar comparison into a
+single interface with three modes:
 
-Inspired by:
-  - 03-06-2025-1338_flow_and_pressure_analysis.py
-  - 27-05-2025-0041_configuration_comparison.py
+Modes
+-----
+1. **Compare Tests** — select individual tests (ad-hoc or from a saved
+   test group) and run cross-test analysis with 7+ chart types.  If the
+   selection mixes constant-frequency and sweep tests, the page warns
+   and optionally extracts sweep data at the matching frequency.
 
-User workflow
--------------
-1. **Sidebar → Data Source** — same root folder as the Explorer page.
-2. **Sidebar → Analysis Settings** — bin widths, max raw points.
-3. **Sidebar → Plot Appearance** — mode, marker size, opacity,
-   error-bar toggle.
-4. **Sidebar → Stability Cloud** — thresholds for high-flow /
-   high-stability detection.
-5. **Main area** — multi-select tests, then explore 7 tabs:
-   - 📊 Individual per-test sweeps
-   - 🔀 Combined overlay (+ relative)
-   - 📏 Global average curve
-   - ⚡ All raw data points
-   - 📦 EDA (boxplots, histograms, correlation heatmap, summary table)
-   - 📐 Std vs Mean scatter
-   - 🎯 Best operating region finder (stability cloud)
+2. **Compare Bars** — select bars (pump groups) or a shipment and
+   compare aggregated results across pumps.
+
+3. **Manage Groups** — CRUD for bars, shipments, and test groups.
 
 Inputs
 ------
-- Local folder path + multi-selected test folders.
-- CSV files auto-picked by ``io_local.pick_best_csv``.
+- Local folder path (OneDrive-synced root with test subfolders).
+- ``bar_groups.json`` for persisted definitions.
+- CSV files for each test folder.
 
 Outputs
 -------
-- Interactive Plotly charts and ``pd.DataFrame`` summary tables.
-- Optional HTML exports to ``app/data/exports/``.
+- Interactive Plotly charts and summary tables.
+- Updated ``bar_groups.json`` on create / edit / delete.
 """
 
 from __future__ import annotations
 
 import traceback
+from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -52,16 +42,36 @@ from ..data.io_local import (
     pick_best_csv,
     read_csv_full,
 )
-from ..data.config import PLOT_BIN_WIDTH_HZ, PLOT_HEIGHT
+from ..data.config import (
+    DEFAULT_CONSTANT_FREQUENCY_HZ,
+    PLOT_BIN_WIDTH_HZ,
+    PLOT_HEIGHT,
+)
 from ..data.data_processor import (
     bin_by_frequency,
+    detect_constant_frequency,
     detect_test_type,
     detect_time_format,
+    extract_frequency_slice,
     guess_signal_column,
     guess_time_column,
     parse_sweep_spec_from_name,
     prepare_sweep_data,
     prepare_time_series_data,
+)
+from ..data.bar_groups import (
+    Bar,
+    BarGroupsStore,
+    Shipment,
+    TestGroup,
+    add_bar,
+    add_shipment,
+    add_test_group,
+    load_bar_groups,
+    remove_bar,
+    remove_shipment,
+    remove_test_group,
+    save_bar_groups,
 )
 from ..plots.analysis_plots import (
     build_summary_table,
@@ -76,77 +86,92 @@ from ..plots.analysis_plots import (
     plot_stability_cloud,
     plot_std_vs_mean,
 )
-from ..plots.plot_generator import export_html
+from ..plots.bar_comparison_plots import (
+    build_bar_summary_table,
+    plot_bar_constant_aggregated,
+    plot_bar_constant_boxplots,
+    plot_bar_constant_histograms,
+    plot_bar_sweep_overlay,
+    plot_bar_sweep_relative,
+)
+from ..plots.plot_generator import export_html, plot_sweep_binned
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Cached loader
-# ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────
+# Cached loader & session-state helpers
+# ────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_csv_cached(csv_path_str: str) -> pd.DataFrame:
-    """Load a CSV with Streamlit caching (5-min TTL, keyed by path string)."""
+    """Load a CSV with Streamlit caching (5-min TTL)."""
     return read_csv_full(csv_path_str)
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Main entry point
-# ────────────────────────────────────────────────────────────────────────────
+def _get_store() -> BarGroupsStore:
+    """Return the in-memory bar-groups store (loads from disk on first access)."""
+    key = "_bar_groups_store"
+    if key not in st.session_state:
+        st.session_state[key] = load_bar_groups()
+    return st.session_state[key]
 
-def main() -> None:  # noqa: C901  — unavoidable complexity for a full page
+
+def _persist() -> None:
+    """Flush the bar-groups store to ``bar_groups.json``."""
+    save_bar_groups(_get_store())
+
+
+def _maybe_export(fig, filename: str, S: dict) -> None:
+    """Export a figure to HTML if the toggle is on."""
+    if S.get("export"):
+        try:
+            path = export_html(fig, filename)
+            st.success(f"✅ Exported: {path.name}")
+        except Exception:
+            pass
+
+
+# ════════════════════════════════════════════════════════════════════════
+# MAIN ENTRY POINT
+# ════════════════════════════════════════════════════════════════════════
+
+def main() -> None:  # noqa: C901
     """Entry point for the Comprehensive Analysis page."""
     try:
         st.title("🔬 Comprehensive Analysis")
-        st.markdown(
-            "Compare multiple tests side-by-side. "
-            "Select **≥ 2 tests** for cross-test analyses."
-        )
 
-        # ================================================================
-        # SIDEBAR
-        # ================================================================
+        # ── Sidebar ─────────────────────────────────────────────
         with st.sidebar:
             st.header("📁 Data Source")
             if "last_data_path" not in st.session_state:
                 st.session_state.last_data_path = ""
-
             data_folder_str = st.text_input(
                 "Path to test data folder",
                 value=st.session_state.last_data_path,
                 placeholder="/Users/.../All_tests",
-                help="Same path as the Explorer page.",
                 key="analysis_data_path",
             )
 
             st.divider()
             st.header("⚙️ Analysis Settings")
-
             bin_hz = st.slider(
-                "Frequency bin width (Hz)",
-                min_value=0.5,
-                max_value=100.0,
-                value=float(PLOT_BIN_WIDTH_HZ),
-                step=0.5,
-                key="analysis_bin_hz",
-                help="Bin width for per-test and combined frequency plots.",
+                "Frequency bin width (Hz)", 0.5, 100.0,
+                float(PLOT_BIN_WIDTH_HZ), 0.5, key="a_bin",
             )
             avg_bin_hz = st.slider(
-                "Average-curve bin width (Hz)",
-                min_value=0.5,
-                max_value=100.0,
-                value=3.0,
-                step=0.5,
-                key="analysis_avg_bin",
-                help="Bin width for the global average curve.",
+                "Average-curve bin width (Hz)", 0.5, 100.0,
+                3.0, 0.5, key="a_avg",
             )
-            max_raw_points = st.slider(
-                "Max raw points per test",
-                min_value=1000,
-                max_value=500000,
-                value=50000,
-                step=5000,
-                key="analysis_max_pts",
-                help="Cap per test to keep browser responsive.",
+            max_raw = st.slider(
+                "Max raw points per test", 1000, 500000,
+                50000, 5000, key="a_maxpts",
+            )
+            freq_tol = st.slider(
+                "Freq-match tolerance (Hz)", 0.5, 50.0, 5.0, 0.5,
+                key="a_ftol",
+                help=(
+                    "When comparing mixed test types, sweep data within "
+                    "±this of the constant frequency is used."
+                ),
             )
 
             st.divider()
@@ -154,509 +179,1266 @@ def main() -> None:  # noqa: C901  — unavoidable complexity for a full page
             plot_mode = st.selectbox(
                 "Plot type",
                 ["lines+markers", "lines", "markers"],
-                key="analysis_plot_mode",
+                key="a_mode",
             )
-            marker_size = st.slider(
-                "Marker size", 1, 20, 6, key="analysis_marker_size"
+            marker_sz = st.slider("Marker size", 1, 20, 6, key="a_msz")
+            opacity = st.slider(
+                "Opacity", 0.1, 1.0, 0.8, 0.05, key="a_opa",
             )
-            marker_opacity = st.slider(
-                "Opacity", 0.1, 1.0, 0.8, step=0.05, key="analysis_opacity"
+            err_bars = st.checkbox(
+                "Show ±1 std bands", True, key="a_err",
             )
-            show_error_bars = st.checkbox(
-                "Show ±1 std bands", value=True, key="analysis_error_bars"
-            )
-            export_html_toggle = st.checkbox(
-                "Export plots as HTML", value=False, key="analysis_export"
+            export = st.checkbox(
+                "Export plots as HTML", False, key="a_exp",
             )
 
             st.divider()
             st.header("🎯 Stability Cloud")
             mean_pct = st.slider(
-                "High-flow threshold (%)",
-                50,
-                99,
-                75,
-                key="analysis_mean_pct",
-                help="Top N % by mean flow.",
+                "High-flow %", 50, 99, 75, key="a_mpct",
             )
             std_pct = st.slider(
-                "Stability threshold (%)",
-                1,
-                50,
-                10,
-                key="analysis_std_pct",
-                help="Bottom N % by std within the high-flow set.",
+                "Stability %", 1, 50, 10, key="a_spct",
             )
 
-        # ================================================================
-        # VALIDATE PATH
-        # ================================================================
-        if not data_folder_str.strip():
-            st.info("ℹ️ Enter a data folder path in the sidebar to get started.")
-            st.stop()
+        # Pack settings for easy passing
+        S = dict(
+            bin_hz=bin_hz, avg_bin_hz=avg_bin_hz, max_raw=max_raw,
+            freq_tol=freq_tol, plot_mode=plot_mode, marker_sz=marker_sz,
+            opacity=opacity, err_bars=err_bars, export=export,
+            mean_pct=mean_pct, std_pct=std_pct,
+        )
 
-        try:
-            root = normalize_root(data_folder_str)
-            if data_folder_str != st.session_state.last_data_path:
-                st.session_state.last_data_path = data_folder_str
-        except Exception as e:
-            st.error(f"❌ Invalid path: {e}")
-            st.stop()
+        # ── Resolve data path ──────────────────────────────────
+        run_dirs: list = []
+        run_names: list[str] = []
 
-        try:
-            run_dirs = list(list_run_dirs(root))
-        except Exception as e:
-            st.error(f"❌ Failed to list folders: {e}")
-            st.stop()
+        if data_folder_str.strip():
+            try:
+                root = normalize_root(data_folder_str)
+                if data_folder_str != st.session_state.last_data_path:
+                    st.session_state.last_data_path = data_folder_str
+                run_dirs = list(list_run_dirs(root))
+                run_names = [p.name for p in run_dirs]
+            except Exception as e:
+                st.error(f"❌ Invalid path: {e}")
 
-        if not run_dirs:
-            st.error("❌ No subfolders found.")
-            st.stop()
+        # ── Mode selector ──────────────────────────────────────
+        mode = st.radio(
+            "What would you like to do?",
+            ["📊 Compare Tests", "📦 Compare Bars", "🛠️ Manage Groups"],
+            horizontal=True,
+            key="a_toplevel",
+        )
+        st.divider()
 
-        # ================================================================
-        # TEST SELECTION
-        # ================================================================
-        run_names = [p.name for p in run_dirs]
+        if mode == "📊 Compare Tests":
+            _render_compare_tests(S, run_dirs, run_names)
+        elif mode == "📦 Compare Bars":
+            _render_compare_bars(S, run_dirs, run_names)
+        else:
+            _render_manage_groups(run_names)
 
+    except Exception as e:
+        st.error(f"❌ **CRITICAL ERROR:** {str(e)}")
+        with st.expander("🔍 Debug"):
+            st.code(traceback.format_exc())
+
+
+# ════════════════════════════════════════════════════════════════════════
+# MODE 1 — COMPARE TESTS
+# ════════════════════════════════════════════════════════════════════════
+
+def _render_compare_tests(
+    S: dict, run_dirs: list, run_names: list[str],
+) -> None:
+    """Compare Tests mode — select tests, load, analyse."""
+    store = _get_store()
+
+    # ── Selection method ────────────────────────────────────────
+    sel = st.radio(
+        "How would you like to select tests?",
+        ["Pick from available tests", "Load a saved test group"],
+        horizontal=True,
+        key="ct_sel",
+    )
+
+    selected_names: list[str] = []
+
+    if sel == "Load a saved test group":
+        if not store.test_groups:
+            st.info(
+                "No saved test groups yet.  Create one in **Manage Groups**, "
+                "or pick tests manually."
+            )
+            return
+        grp_names = list(store.test_groups.keys())
+        chosen = st.selectbox("📋 Test group", grp_names, key="ct_grp")
+        selected_names = [
+            t for t in store.test_groups[chosen].tests if t in run_names
+        ]
+        st.caption(
+            f"Group contains {len(store.test_groups[chosen].tests)} test(s), "
+            f"{len(selected_names)} available in current data folder."
+        )
+    else:
+        if not run_names:
+            st.info("ℹ️ Enter a data folder path in the sidebar.")
+            return
         # Quick helpers: select-all / clear
-        c_sel1, c_sel2, c_sel3 = st.columns([3, 0.6, 0.6])
-        with c_sel2:
-            if st.button("Select all", key="analysis_sel_all"):
-                st.session_state["analysis_multiselect"] = run_names
+        c1, c2, c3 = st.columns([3, 0.6, 0.6])
+        with c2:
+            if st.button("All", key="ct_all"):
+                st.session_state["ct_multi"] = run_names
                 st.rerun()
-        with c_sel3:
-            if st.button("Clear", key="analysis_sel_clear"):
-                st.session_state["analysis_multiselect"] = []
+        with c3:
+            if st.button("Clear", key="ct_clr"):
+                st.session_state["ct_multi"] = []
                 st.rerun()
-
-        with c_sel1:
+        with c1:
             selected_names = st.multiselect(
-                "📂 Select tests to compare",
-                options=run_names,
-                default=[],
-                help="Pick 2+ tests for cross-comparison.",
-                key="analysis_multiselect",
+                "📂 Select tests", run_names, key="ct_multi",
             )
 
-        if not selected_names:
-            st.info("👆 Select at least one test folder above.")
-            st.stop()
+    if not selected_names:
+        st.info("👆 Select at least one test to begin.")
+        return
 
-        # ================================================================
-        # LOAD ALL SELECTED TESTS
-        # ================================================================
-        with st.spinner(f"Loading {len(selected_names)} test(s)…"):
-            # all_data   – every test's time-series DataFrame (for EDA)
-            # sweep_data – tests with Frequency column (for freq plots)
-            # binned_data – binned versions of sweep_data
-            all_data: dict[str, pd.DataFrame] = {}
-            sweep_data: dict[str, pd.DataFrame] = {}
-            binned_data: dict[str, pd.DataFrame] = {}
-            load_errors: list[str] = []
-            signal_col_used: str | None = None
-
-            for name in selected_names:
-                run_dir = run_dirs[run_names.index(name)]
-                try:
-                    pick = pick_best_csv(run_dir)
-                    df = _load_csv_cached(str(pick.csv_path))
-
-                    if df.empty:
-                        load_errors.append(f"{name}: empty CSV")
-                        continue
-
-                    # Detect columns
-                    time_col = guess_time_column(df)
-                    sig_col = guess_signal_column(df, "flow")
-                    if not time_col or not sig_col:
-                        load_errors.append(f"{name}: cannot detect columns")
-                        continue
-
-                    if signal_col_used is None:
-                        signal_col_used = sig_col
-
-                    # Prepare basic time-series data
-                    time_fmt = detect_time_format(df, time_col)
-                    ts_df = prepare_time_series_data(
-                        df,
-                        time_col,
-                        sig_col,
-                        parse_time=(time_fmt == "absolute_timestamp"),
+    # ── Optional: save as group ─────────────────────────────────
+    with st.expander("💾 Save selection as a test group", expanded=False):
+        with st.form("ct_save_grp", clear_on_submit=True):
+            grp_name = st.text_input("Group name")
+            grp_desc = st.text_input("Description (optional)")
+            if st.form_submit_button("Save"):
+                if grp_name.strip():
+                    add_test_group(
+                        store,
+                        TestGroup(grp_name, list(selected_names), grp_desc),
                     )
-                    all_data[name] = ts_df
+                    _persist()
+                    st.success(
+                        f"Saved **{grp_name}** ({len(selected_names)} tests)"
+                    )
+                else:
+                    st.error("Name required.")
 
-                    # If the CSV has actual frequency data → sweep analysis
-                    has_freq = "freq_set_hz" in df.columns
-                    if has_freq:
-                        spec = parse_sweep_spec_from_name(name)
+    # ── Load data ───────────────────────────────────────────────
+    data = _load_tests(selected_names, run_dirs, run_names, S)
+    if data is None:
+        return
+
+    (all_data, sweep_data, binned_data, const_data,
+     signal_col, load_errors, test_types, const_freqs) = data
+
+    if load_errors:
+        with st.expander(f"⚠️ {len(load_errors)} load issue(s)", expanded=False):
+            for err in load_errors:
+                st.warning(err)
+
+    n_sweep = len(sweep_data)
+    n_const = len(const_data)
+    st.success(
+        f"✅ Loaded **{len(all_data)}** test(s) — "
+        f"**{n_sweep}** sweep, **{n_const}** constant-freq"
+    )
+
+    # ── Mixed-type warning ──────────────────────────────────────
+    mixed_mode = False
+    matched_const_data: dict[str, pd.DataFrame] = {}
+    target_freq: float | None = None
+
+    if n_sweep > 0 and n_const > 0:
+        # Auto-detect the constant frequency
+        target_freq = _detect_target_freq(const_freqs)
+
+        st.warning(
+            f"⚠️ **Mixed test types detected:** {n_sweep} frequency-sweep "
+            f"test(s) and {n_const} constant-frequency test(s).\n\n"
+            "Sweep tests cover a range of frequencies while constant-"
+            "frequency tests measure at a single frequency.  "
+            "Direct comparison is not straightforward."
+        )
+
+        mixed_mode = st.checkbox(
+            f"Compare anyway — extract sweep data at "
+            f"**{target_freq:.0f} Hz** (±{S['freq_tol']:.0f} Hz) "
+            f"to match constant-frequency tests",
+            key="ct_mixed",
+        )
+
+        if mixed_mode:
+            target_freq_override = st.number_input(
+                "Override target frequency (Hz)",
+                value=float(target_freq),
+                min_value=0.1,
+                step=10.0,
+                key="ct_target_freq",
+            )
+            target_freq = target_freq_override
+
+            # Build matched data: const tests as-is, sweep tests sliced
+            for name, df in const_data.items():
+                matched_const_data[name] = df
+            for name, sdf in sweep_data.items():
+                sliced = extract_frequency_slice(
+                    sdf, target_freq, S["freq_tol"], signal_col,
+                )
+                if not sliced.empty:
+                    matched_const_data[f"{name} @{target_freq:.0f}Hz"] = sliced
+
+    # ── Analysis tabs ───────────────────────────────────────────
+    # Cross-type comparison (if user opted in)
+    if mixed_mode and matched_const_data:
+        _render_mixed_comparison(
+            matched_const_data, signal_col, target_freq, S,
+        )
+        st.divider()
+
+    # Sweep analysis (for sweep tests)
+    if n_sweep > 0:
+        if n_const > 0:
+            st.subheader(f"📈 Frequency-Sweep Tests ({n_sweep})")
+        _render_sweep_analysis(sweep_data, binned_data, signal_col, S)
+
+    # Constant-freq analysis (if not already covered by mixed comparison)
+    if n_const > 0 and not mixed_mode:
+        if n_sweep > 0:
+            st.subheader(f"📊 Constant-Frequency Tests ({n_const})")
+        _render_constant_analysis(const_data, signal_col, S)
+
+
+def _detect_target_freq(const_freqs: dict[str, float]) -> float:
+    """Pick the most common constant frequency across tests."""
+    if not const_freqs:
+        return DEFAULT_CONSTANT_FREQUENCY_HZ
+    counts = Counter(round(f, 1) for f in const_freqs.values())
+    return counts.most_common(1)[0][0]
+
+
+# ════════════════════════════════════════════════════════════════════════
+# SHARED DATA LOADER
+# ════════════════════════════════════════════════════════════════════════
+
+def _load_tests(
+    selected_names: list[str],
+    run_dirs: list,
+    run_names: list[str],
+    S: dict,
+) -> tuple | None:
+    """Load and classify all selected test folders.
+
+    Returns
+    -------
+    (all_data, sweep_data, binned_data, const_data, signal_col,
+     errors, test_types, const_freqs)
+    or ``None`` if nothing loaded.
+    """
+    all_data: dict[str, pd.DataFrame] = {}
+    sweep_data: dict[str, pd.DataFrame] = {}
+    binned_data: dict[str, pd.DataFrame] = {}
+    const_data: dict[str, pd.DataFrame] = {}
+    load_errors: list[str] = []
+    signal_col: str | None = None
+    test_types: dict[str, str] = {}
+    const_freqs: dict[str, float] = {}
+
+    with st.spinner(f"Loading {len(selected_names)} test(s)…"):
+        for name in selected_names:
+            idx = run_names.index(name) if name in run_names else -1
+            if idx < 0:
+                load_errors.append(f"{name}: not found in data folder")
+                continue
+            run_dir = run_dirs[idx]
+
+            try:
+                pick = pick_best_csv(run_dir)
+                df = _load_csv_cached(str(pick.csv_path))
+                if df.empty:
+                    load_errors.append(f"{name}: empty CSV")
+                    continue
+
+                time_col = guess_time_column(df)
+                sig_col = guess_signal_column(df, "flow")
+                if not time_col or not sig_col:
+                    load_errors.append(f"{name}: cannot detect columns")
+                    continue
+                if signal_col is None:
+                    signal_col = sig_col
+
+                time_fmt = detect_time_format(df, time_col)
+                ts_df = prepare_time_series_data(
+                    df, time_col, sig_col,
+                    parse_time=(time_fmt == "absolute_timestamp"),
+                )
+                all_data[name] = ts_df
+
+                # Classify
+                ttype, _, _ = detect_test_type(name, df)
+                test_types[name] = ttype
+                has_freq = "freq_set_hz" in df.columns
+
+                if (ttype == "sweep"
+                        or (has_freq and df["freq_set_hz"].dropna().nunique() > 1)):
+                    # ── Sweep path ──────────────────────────────────────
+                    spec = parse_sweep_spec_from_name(name)
+                    if has_freq or (spec and spec.duration_s > 0):
                         sweep_df = prepare_sweep_data(
-                            ts_df,
-                            time_col,
-                            sig_col,
+                            ts_df, time_col, sig_col,
                             spec=spec,
                             parse_time=(time_fmt == "absolute_timestamp"),
-                            full_df=df,
+                            full_df=df if has_freq else None,
                         )
                         sweep_data[name] = sweep_df
-
-                        # Bin
                         try:
                             binned = bin_by_frequency(
-                                sweep_df,
-                                value_col=sig_col,
-                                freq_col="Frequency",
-                                bin_hz=float(bin_hz),
+                                sweep_df, value_col=sig_col,
+                                freq_col="Frequency", bin_hz=S["bin_hz"],
                             )
                             binned_data[name] = binned
                         except Exception as be:
                             load_errors.append(f"{name}: binning — {be}")
                     else:
-                        # No frequency column — still try sweep via regex
-                        spec = parse_sweep_spec_from_name(name)
-                        if spec and spec.duration_s > 0:
-                            try:
-                                sweep_df = prepare_sweep_data(
-                                    ts_df,
-                                    time_col,
-                                    sig_col,
-                                    spec=spec,
-                                    parse_time=(time_fmt == "absolute_timestamp"),
-                                )
-                                sweep_data[name] = sweep_df
-                                binned = bin_by_frequency(
-                                    sweep_df,
-                                    value_col=sig_col,
-                                    freq_col="Frequency",
-                                    bin_hz=float(bin_hz),
-                                )
-                                binned_data[name] = binned
-                            except Exception:
-                                pass  # best-effort
+                        # Sweep by name but no usable freq data → treat as const
+                        const_data[name] = ts_df
+                        cf = detect_constant_frequency(df, name)
+                        if cf:
+                            const_freqs[name] = cf
+                else:
+                    # ── Constant frequency path ─────────────────────────
+                    const_data[name] = ts_df
+                    cf = detect_constant_frequency(df, name)
+                    if cf:
+                        const_freqs[name] = cf
 
-                except Exception as e:
-                    load_errors.append(f"{name}: {e}")
+            except Exception as e:
+                load_errors.append(f"{name}: {e}")
 
-        # ── Load status ─────────────────────────────────────────
-        n_all = len(all_data)
-        n_sweep = len(sweep_data)
-        n_binned = len(binned_data)
+    if not all_data:
+        st.error("❌ No tests loaded successfully.")
+        return None
 
-        if load_errors:
-            with st.expander(f"⚠️ {len(load_errors)} load error(s)", expanded=False):
-                for err in load_errors:
-                    st.warning(err)
+    if signal_col is None:
+        signal_col = "flow"
 
-        if n_all == 0:
-            st.error("❌ No tests loaded successfully.")
-            st.stop()
+    return (
+        all_data, sweep_data, binned_data, const_data,
+        signal_col, load_errors, test_types, const_freqs,
+    )
 
-        st.success(
-            f"✅ Loaded **{n_all}** test(s) — "
-            f"**{n_binned}** with frequency data for sweep analysis"
-        )
 
-        if signal_col_used is None:
-            signal_col_used = "flow"
+# ════════════════════════════════════════════════════════════════════════
+# SWEEP ANALYSIS TABS
+# ════════════════════════════════════════════════════════════════════════
 
-        # ================================================================
-        # TABS
-        # ================================================================
-        tabs = st.tabs(
-            [
-                "📊 Individual",
-                "🔀 Combined",
-                "📏 Average",
-                "⚡ Raw Points",
-                "📦 EDA",
-                "📐 Std vs Mean",
-                "🎯 Best Region",
-            ]
-        )
+def _render_sweep_analysis(
+    sweep_data: dict[str, pd.DataFrame],
+    binned_data: dict[str, pd.DataFrame],
+    signal_col: str,
+    S: dict,
+) -> None:
+    """Render the full set of sweep-analysis tabs."""
+    n_binned = len(binned_data)
 
-        # ── TAB 1: Individual per-test plots ────────────────────
-        with tabs[0]:
-            st.subheader("Individual Test Results")
-            if not binned_data:
-                st.info(
-                    "No tests with frequency data. "
-                    "Only tests containing a `freq_set_hz` column "
-                    "are shown here."
-                )
-            else:
-                for name in binned_data:
-                    with st.expander(
-                        f"📈 {name}", expanded=(len(binned_data) <= 3)
-                    ):
-                        from ..plots.plot_generator import plot_sweep_binned
+    tabs = st.tabs([
+        "📊 Individual",
+        "🔀 Combined",
+        "📏 Average",
+        "⚡ Raw Points",
+        "📦 EDA",
+        "📐 Std vs Mean",
+        "🎯 Best Region",
+    ])
 
-                        binned = binned_data[name]
-                        fig_b = plot_sweep_binned(
-                            binned,
-                            title=f"{name} — Binned Mean ± Std (Δf = {bin_hz:g} Hz)",
-                            mode=plot_mode,
-                            marker_size=marker_size,
+    # ── TAB 1: Individual per-test ──────────────────────────────
+    with tabs[0]:
+        st.subheader("Individual Test Results")
+        if not binned_data:
+            st.info("No frequency-binned data available.")
+        else:
+            for name in binned_data:
+                with st.expander(f"📈 {name}", expanded=(n_binned <= 3)):
+                    fig_b = plot_sweep_binned(
+                        binned_data[name],
+                        title=f"{name} — Binned (Δf = {S['bin_hz']:g} Hz)",
+                        mode=S["plot_mode"],
+                        marker_size=S["marker_sz"],
+                    )
+                    st.plotly_chart(fig_b, use_container_width=True)
+
+                    if name in sweep_data:
+                        fig_sw = plot_per_test_sweeps(
+                            sweep_data[name],
+                            signal_col=signal_col,
+                            bin_hz=S["bin_hz"],
+                            title=f"{name} — Per Sweep",
+                            mode=S["plot_mode"],
+                            marker_size=max(1, S["marker_sz"] - 1),
                         )
-                        st.plotly_chart(fig_b, use_container_width=True)
+                        st.plotly_chart(fig_sw, use_container_width=True)
 
-                        # Per-sweep breakdown
-                        if name in sweep_data:
-                            fig_sw = plot_per_test_sweeps(
-                                sweep_data[name],
-                                signal_col=signal_col_used,
-                                bin_hz=float(bin_hz),
-                                title=f"{name} — Per Sweep",
-                                mode=plot_mode,
-                                marker_size=max(1, marker_size - 1),
-                            )
-                            st.plotly_chart(fig_sw, use_container_width=True)
+                    # Quick metrics
+                    if name in sweep_data and signal_col in sweep_data[name].columns:
+                        s = sweep_data[name][signal_col].dropna()
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Mean", f"{s.mean():.2f} µL/min")
+                        c2.metric("Std", f"{s.std():.2f} µL/min")
+                        c3.metric("Min", f"{s.min():.2f} µL/min")
+                        c4.metric("Max", f"{s.max():.2f} µL/min")
 
-                        # Quick metrics
-                        if name in sweep_data and signal_col_used in sweep_data[name].columns:
-                            s = sweep_data[name][signal_col_used].dropna()
-                            c1, c2, c3, c4 = st.columns(4)
-                            c1.metric("Mean", f"{s.mean():.2f} µL/min")
-                            c2.metric("Std", f"{s.std():.2f} µL/min")
-                            c3.metric("Min", f"{s.min():.2f} µL/min")
-                            c4.metric("Max", f"{s.max():.2f} µL/min")
+                    _maybe_export(fig_b, f"{name}_binned.html", S)
 
-                        if export_html_toggle:
-                            try:
-                                path = export_html(fig_b, f"{name}_binned.html")
-                                st.caption(f"✅ Exported: {path.name}")
-                            except Exception:
-                                pass
+    # ── TAB 2: Combined overlay ─────────────────────────────────
+    with tabs[1]:
+        st.subheader("Combined Frequency Sweep Comparison")
+        if n_binned < 1:
+            st.info("Need at least 1 test with frequency data.")
+        else:
+            fig_comb = plot_combined_overlay(
+                binned_data,
+                show_error_bars=S["err_bars"],
+                mode=S["plot_mode"],
+                marker_size=S["marker_sz"],
+            )
+            st.plotly_chart(fig_comb, use_container_width=True)
+            _maybe_export(fig_comb, "combined_overlay.html", S)
 
-        # ── TAB 2: Combined overlay ─────────────────────────────
-        with tabs[1]:
-            st.subheader("Combined Frequency Sweep Comparison")
-            if len(binned_data) < 1:
-                st.info("Need at least 1 test with frequency data.")
-            else:
-                fig_comb = plot_combined_overlay(
-                    binned_data,
-                    show_error_bars=show_error_bars,
-                    mode=plot_mode,
-                    marker_size=marker_size,
-                )
-                st.plotly_chart(fig_comb, use_container_width=True)
+            st.divider()
+            st.subheader("Relative (0–100 %) Comparison")
+            fig_rel = plot_relative_comparison(
+                binned_data,
+                mode=S["plot_mode"],
+                marker_size=S["marker_sz"],
+            )
+            st.plotly_chart(fig_rel, use_container_width=True)
 
-                if export_html_toggle:
-                    try:
-                        path = export_html(fig_comb, "combined_overlay.html")
-                        st.success(f"✅ Exported: {path.name}")
-                    except Exception:
-                        pass
+    # ── TAB 3: Global average ───────────────────────────────────
+    with tabs[2]:
+        st.subheader("Global Average Across Tests")
+        if n_binned < 2:
+            st.info("Need ≥ 2 tests for averaging.")
+        else:
+            fig_avg, avg_df = plot_global_average(
+                binned_data,
+                bin_hz=S["avg_bin_hz"],
+                mode=S["plot_mode"],
+                marker_size=S["marker_sz"],
+            )
+            st.plotly_chart(fig_avg, use_container_width=True)
+            _maybe_export(fig_avg, "global_average.html", S)
 
-                # Relative comparison
-                st.divider()
-                st.subheader("Relative (0–100 %) Comparison")
-                st.caption(
-                    "Each test's mean flow normalized to its own 0–100 % range."
-                )
-                fig_rel = plot_relative_comparison(
-                    binned_data, mode=plot_mode, marker_size=marker_size
-                )
-                st.plotly_chart(fig_rel, use_container_width=True)
-
-        # ── TAB 3: Global average ───────────────────────────────
-        with tabs[2]:
-            st.subheader("Global Average Across Tests")
-            if len(binned_data) < 2:
-                st.info("Need ≥ 2 tests with frequency data for averaging.")
-            else:
-                fig_avg, avg_df = plot_global_average(
-                    binned_data,
-                    bin_hz=float(avg_bin_hz),
-                    mode=plot_mode,
-                    marker_size=marker_size,
-                )
-                st.plotly_chart(fig_avg, use_container_width=True)
-
-                if export_html_toggle:
-                    try:
-                        path = export_html(fig_avg, "global_average.html")
-                        st.success(f"✅ Exported: {path.name}")
-                    except Exception:
-                        pass
-
-                with st.expander("📋 Average Curve Data"):
-                    st.dataframe(avg_df, use_container_width=True, hide_index=True)
-
-        # ── TAB 4: All raw points ───────────────────────────────
-        with tabs[3]:
-            st.subheader("All Raw Data Points")
-            if not sweep_data:
-                st.info("No tests with frequency data.")
-            else:
-                # Cap per-test for browser performance
-                capped_raw: dict[str, pd.DataFrame] = {}
-                for name, sdf in sweep_data.items():
-                    if len(sdf) > max_raw_points:
-                        capped_raw[name] = sdf.sample(
-                            n=max_raw_points, random_state=42
-                        )
-                    else:
-                        capped_raw[name] = sdf
-
-                total_pts = sum(len(d) for d in capped_raw.values())
-                st.caption(
-                    f"Showing {total_pts:,} points "
-                    f"(capped at {max_raw_points:,} per test)"
-                )
-
-                fig_raw = plot_all_raw_points(
-                    capped_raw,
-                    freq_col="Frequency",
-                    signal_col=signal_col_used,
-                    marker_size=marker_size,
-                    opacity=marker_opacity,
-                )
-                st.plotly_chart(fig_raw, use_container_width=True)
-
-                if export_html_toggle:
-                    try:
-                        path = export_html(fig_raw, "all_raw_points.html")
-                        st.success(f"✅ Exported: {path.name}")
-                    except Exception:
-                        pass
-
-        # ── TAB 5: EDA ──────────────────────────────────────────
-        with tabs[4]:
-            st.subheader("Exploratory Data Analysis")
-
-            # Summary statistics table
-            st.markdown("### 📋 Summary Statistics")
-            # Use all_data (includes non-sweep tests) for broad EDA
-            stats_df = build_summary_table(all_data, signal_col=signal_col_used)
-            if not stats_df.empty:
+            with st.expander("📋 Average Curve Data"):
                 st.dataframe(
-                    stats_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "CV (%)": st.column_config.NumberColumn(format="%.2f"),
-                    },
+                    avg_df, use_container_width=True, hide_index=True,
                 )
-            else:
-                st.info("No signal data available.")
 
-            # Boxplots + Histograms side-by-side
-            col_l, col_r = st.columns(2)
-            with col_l:
-                st.markdown("### 📦 Boxplots")
-                fig_box = plot_combined_boxplots(
-                    all_data, signal_col=signal_col_used
+    # ── TAB 4: Raw points ───────────────────────────────────────
+    with tabs[3]:
+        st.subheader("All Raw Data Points")
+        if not sweep_data:
+            st.info("No frequency data.")
+        else:
+            capped: dict[str, pd.DataFrame] = {}
+            for n, d in sweep_data.items():
+                capped[n] = (
+                    d.sample(n=S["max_raw"], random_state=42)
+                    if len(d) > S["max_raw"] else d
                 )
-                st.plotly_chart(fig_box, use_container_width=True)
+            total_pts = sum(len(d) for d in capped.values())
+            st.caption(
+                f"Showing {total_pts:,} points "
+                f"(capped at {S['max_raw']:,}/test)"
+            )
+            fig_raw = plot_all_raw_points(
+                capped,
+                freq_col="Frequency",
+                signal_col=signal_col,
+                marker_size=S["marker_sz"],
+                opacity=S["opacity"],
+            )
+            st.plotly_chart(fig_raw, use_container_width=True)
+            _maybe_export(fig_raw, "all_raw_points.html", S)
 
-            with col_r:
-                st.markdown("### 📊 Histograms")
-                nbins = st.slider(
-                    "Histogram bins", 10, 200, 50, key="eda_hist_bins"
-                )
-                fig_hist = plot_combined_histograms(
-                    all_data, signal_col=signal_col_used, nbins=nbins
-                )
-                st.plotly_chart(fig_hist, use_container_width=True)
+    # ── TAB 5: EDA ──────────────────────────────────────────────
+    with tabs[4]:
+        st.subheader("Exploratory Data Analysis")
 
-            # Correlation heatmap
-            if len(binned_data) >= 2:
-                st.markdown("### 🔗 Inter-Test Correlation")
-                st.caption(
-                    "Pearson correlation between binned mean-flow curves "
-                    "(interpolated onto a common frequency grid)."
-                )
-                fig_corr = plot_correlation_heatmap(binned_data)
-                st.plotly_chart(fig_corr, use_container_width=True)
+        eda_data = {
+            n: d for n, d in sweep_data.items()
+            if signal_col in d.columns
+        }
+        if not eda_data:
+            eda_data = dict(sweep_data)
 
-        # ── TAB 6: Std vs Mean ──────────────────────────────────
-        with tabs[5]:
-            st.subheader("Variability Analysis: Std vs Mean")
-            if not binned_data:
-                st.info("No binned frequency data available.")
-            else:
-                fig_svm = plot_std_vs_mean(
-                    binned_data, marker_size=marker_size
-                )
-                st.plotly_chart(fig_svm, use_container_width=True)
+        # Summary table
+        st.markdown("### 📋 Summary Statistics")
+        stats = build_summary_table(eda_data, signal_col=signal_col)
+        if not stats.empty:
+            st.dataframe(
+                stats, use_container_width=True, hide_index=True,
+                column_config={
+                    "CV (%)": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
 
-                with st.expander("ℹ️ Interpretation guide"):
-                    st.markdown(
-                        """
-**How to read this plot:**
+        # Boxplots + Histograms
+        col_l, col_r = st.columns(2)
+        with col_l:
+            st.markdown("### 📦 Boxplots")
+            st.plotly_chart(
+                plot_combined_boxplots(eda_data, signal_col=signal_col),
+                use_container_width=True,
+            )
+        with col_r:
+            st.markdown("### 📊 Histograms")
+            nbins = st.slider("Bins", 10, 200, 50, key="eda_bins")
+            st.plotly_chart(
+                plot_combined_histograms(
+                    eda_data, signal_col=signal_col, nbins=nbins,
+                ),
+                use_container_width=True,
+            )
 
-Each point represents one frequency bin from one test.
+        # Correlation heatmap
+        if n_binned >= 2:
+            st.markdown("### 🔗 Inter-Test Correlation")
+            st.plotly_chart(
+                plot_correlation_heatmap(binned_data),
+                use_container_width=True,
+            )
 
+    # ── TAB 6: Std vs Mean ──────────────────────────────────────
+    with tabs[5]:
+        st.subheader("Variability: Std vs Mean")
+        if not binned_data:
+            st.info("No binned data.")
+        else:
+            fig_svm = plot_std_vs_mean(
+                binned_data, marker_size=S["marker_sz"],
+            )
+            st.plotly_chart(fig_svm, use_container_width=True)
+            _maybe_export(fig_svm, "std_vs_mean.html", S)
+
+            with st.expander("ℹ️ Interpretation guide"):
+                st.markdown(
+                    """
 | Pattern | Meaning |
 |---------|---------|
-| **R² ≈ 1** | Variability scales with magnitude (proportional noise) |
-| **R² ≈ 0** | Variability is roughly constant regardless of flow |
-| Points **below** trend line | More stable than expected at that flow level |
-| Points **above** trend line | Less predictable than expected |
-| **Steep slope** | Higher flows come with disproportionately more noise |
-| **Flat slope** | Noise is similar across all flow levels |
+| **R² ≈ 1** | Noise scales with flow (proportional) |
+| **R² ≈ 0** | Constant noise regardless of flow |
+| Below trend line | More stable than expected |
+| Above trend line | Less predictable than expected |
+| Steep slope | Higher flow → disproportionately more noise |
+| Flat slope | Noise similar across all flow levels |
 """
+                )
+
+    # ── TAB 7: Best region ──────────────────────────────────────
+    with tabs[6]:
+        st.subheader("Best Operating Region")
+        if not binned_data:
+            st.info("No binned data.")
+        else:
+            fig_stab, best_df = plot_stability_cloud(
+                binned_data,
+                mean_threshold_pct=float(S["mean_pct"]),
+                std_threshold_pct=float(S["std_pct"]),
+                marker_size=S["marker_sz"],
+            )
+            st.plotly_chart(fig_stab, use_container_width=True)
+
+            st.markdown(
+                f"**Method:** Top {S['mean_pct']}% by mean flow → orange.  "
+                f"Bottom {S['std_pct']}% by std within those → 🟢 green stars."
+            )
+
+            if not best_df.empty:
+                st.markdown("### 🏆 Best Operating Points")
+                st.dataframe(
+                    best_df[["test", "freq_center", "mean", "std"]]
+                    .rename(columns={
+                        "test": "Test",
+                        "freq_center": "Frequency (Hz)",
+                        "mean": "Mean (µL/min)",
+                        "std": "Std (µL/min)",
+                    })
+                    .sort_values("Mean (µL/min)", ascending=False),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            _maybe_export(fig_stab, "stability_cloud.html", S)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# CONSTANT-FREQ ANALYSIS TABS
+# ════════════════════════════════════════════════════════════════════════
+
+def _render_constant_analysis(
+    const_data: dict[str, pd.DataFrame],
+    signal_col: str,
+    S: dict,
+) -> None:
+    """Render comparison tabs for constant-frequency tests."""
+    tabs = st.tabs(["📦 Boxplots", "📊 Histograms", "📋 Summary"])
+
+    with tabs[0]:
+        fig = plot_combined_boxplots(
+            const_data, signal_col=signal_col,
+            title="Constant-Frequency Flow Distribution",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[1]:
+        nbins = st.slider("Bins", 10, 200, 50, key="const_bins")
+        fig = plot_combined_histograms(
+            const_data, signal_col=signal_col, nbins=nbins,
+            title="Constant-Frequency Flow Histograms",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[2]:
+        stats = build_summary_table(const_data, signal_col=signal_col)
+        if not stats.empty:
+            st.dataframe(
+                stats, use_container_width=True, hide_index=True,
+                column_config={
+                    "CV (%)": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
+        else:
+            st.info("No signal data available.")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# MIXED-TYPE COMPARISON
+# ════════════════════════════════════════════════════════════════════════
+
+def _render_mixed_comparison(
+    matched_data: dict[str, pd.DataFrame],
+    signal_col: str,
+    target_freq: float,
+    S: dict,
+) -> None:
+    """Render cross-type comparison at the matched frequency."""
+    st.subheader(f"🔀 Cross-Type Comparison at {target_freq:.0f} Hz")
+    st.caption(
+        f"Constant-frequency tests shown as-is.  Sweep tests filtered to "
+        f"{target_freq:.0f} ± {S['freq_tol']:.0f} Hz."
+    )
+
+    tabs = st.tabs(["📦 Boxplots", "📊 Histograms", "📋 Summary"])
+
+    with tabs[0]:
+        fig = plot_combined_boxplots(
+            matched_data, signal_col=signal_col,
+            title=f"Flow at {target_freq:.0f} Hz — All Tests",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[1]:
+        nbins = st.slider("Bins", 10, 200, 50, key="mixed_bins")
+        fig = plot_combined_histograms(
+            matched_data, signal_col=signal_col, nbins=nbins,
+            title=f"Flow Distribution at {target_freq:.0f} Hz",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[2]:
+        stats = build_summary_table(matched_data, signal_col=signal_col)
+        if not stats.empty:
+            st.dataframe(
+                stats, use_container_width=True, hide_index=True,
+                column_config={
+                    "CV (%)": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
+
+
+# ════════════════════════════════════════════════════════════════════════
+# MODE 2 — COMPARE BARS
+# ════════════════════════════════════════════════════════════════════════
+
+def _render_compare_bars(
+    S: dict, run_dirs: list, run_names: list[str],
+) -> None:
+    """Compare Bars mode — select bars or shipment, load, compare."""
+    store = _get_store()
+
+    if not store.bars:
+        st.info(
+            "No bars defined yet.  Switch to **Manage Groups** to create bars."
+        )
+        return
+
+    # ── Selection ───────────────────────────────────────────────
+    sel = st.radio(
+        "How would you like to select bars?",
+        ["Pick bars manually", "Load a saved shipment"],
+        horizontal=True,
+        key="cb_sel",
+    )
+
+    selected_bar_names: list[str] = []
+
+    if sel == "Load a saved shipment":
+        if not store.shipments:
+            st.info(
+                "No shipments saved.  Create one in Manage Groups, "
+                "or pick bars manually."
+            )
+            return
+        opts = list(store.shipments.keys())
+        labels = [
+            f"{n}  ({store.shipments[n].recipient or '—'})"
+            for n in opts
+        ]
+        chosen_idx = st.selectbox(
+            "🚚 Shipment",
+            range(len(opts)),
+            format_func=lambda i: labels[i],
+            key="cb_ship",
+        )
+        ship = store.shipments[opts[chosen_idx]]
+        selected_bar_names = [b for b in ship.bars if b in store.bars]
+        st.markdown(
+            f"**Shipment:** {ship.name}  ·  "
+            f"**Recipient:** {ship.recipient or '—'}  ·  "
+            f"**Bars:** {', '.join(selected_bar_names) or 'none'}"
+        )
+    else:
+        selected_bar_names = st.multiselect(
+            "📦 Bars to compare",
+            list(store.bars.keys()),
+            key="cb_bars",
+        )
+
+    if not selected_bar_names:
+        st.info("👆 Select at least one bar.")
+        return
+    if len(selected_bar_names) < 2:
+        st.warning("Select **≥ 2 bars** for meaningful comparison.")
+
+    # ── Load bar data ───────────────────────────────────────────
+    run_map = {p.name: p for p in run_dirs}
+    bar_sweep_binned: dict[str, dict[str, pd.DataFrame]] = {}
+    bar_sweep_raw: dict[str, dict[str, pd.DataFrame]] = {}
+    bar_const_data: dict[str, dict[str, pd.DataFrame]] = {}
+    load_errors: list[str] = []
+    signal_col: str | None = None
+
+    with st.spinner(f"Loading {len(selected_bar_names)} bar(s)…"):
+        for bar_name in selected_bar_names:
+            bar = store.bars[bar_name]
+            bar_sweep_binned[bar_name] = {}
+            bar_sweep_raw[bar_name] = {}
+            bar_const_data[bar_name] = {}
+
+            for test_name in bar.tests:
+                if test_name not in run_map:
+                    load_errors.append(
+                        f"{bar_name}/{test_name}: not in data folder"
                     )
+                    continue
 
-                if export_html_toggle:
-                    try:
-                        path = export_html(fig_svm, "std_vs_mean.html")
-                        st.success(f"✅ Exported: {path.name}")
-                    except Exception:
-                        pass
+                try:
+                    pick = pick_best_csv(run_map[test_name])
+                    df = _load_csv_cached(str(pick.csv_path))
+                    if df.empty:
+                        load_errors.append(f"{bar_name}/{test_name}: empty")
+                        continue
 
-        # ── TAB 7: Best operating region ────────────────────────
-        with tabs[6]:
-            st.subheader("Best Operating Region Finder")
-            if not binned_data:
-                st.info("No binned frequency data available.")
-            else:
-                fig_stab, best_df = plot_stability_cloud(
-                    binned_data,
-                    mean_threshold_pct=float(mean_pct),
-                    std_threshold_pct=float(std_pct),
-                    marker_size=marker_size,
-                )
-                st.plotly_chart(fig_stab, use_container_width=True)
-
-                st.markdown(
-                    f"""
-**Method:**
-1. Pool all frequency bins from every selected test.
-2. Select the **top {mean_pct} %** by mean flow → orange markers.
-3. Within those, select the **bottom {std_pct} %** by std deviation
-   → green stars.
-
-🟢 **Green stars** = best candidates for the highest, most stable flow.
-Hover over points to see the test name and frequency.
-"""
-                )
-
-                if not best_df.empty:
-                    st.markdown("### 🏆 Best Operating Points")
-                    st.dataframe(
-                        best_df[["test", "freq_center", "mean", "std"]]
-                        .rename(
-                            columns={
-                                "test": "Test",
-                                "freq_center": "Frequency (Hz)",
-                                "mean": "Mean (µL/min)",
-                                "std": "Std (µL/min)",
-                            }
+                    tc = guess_time_column(df)
+                    sc = guess_signal_column(df, "flow")
+                    if not tc or not sc:
+                        load_errors.append(
+                            f"{bar_name}/{test_name}: columns?"
                         )
-                        .sort_values("Mean (µL/min)", ascending=False),
-                        use_container_width=True,
-                        hide_index=True,
+                        continue
+                    if signal_col is None:
+                        signal_col = sc
+
+                    tfmt = detect_time_format(df, tc)
+                    ts = prepare_time_series_data(
+                        df, tc, sc,
+                        parse_time=(tfmt == "absolute_timestamp"),
                     )
 
-                if export_html_toggle:
-                    try:
-                        path = export_html(fig_stab, "stability_cloud.html")
-                        st.success(f"✅ Exported: {path.name}")
-                    except Exception:
-                        pass
+                    ttype, _, _ = detect_test_type(test_name, df)
+                    if ttype == "sweep":
+                        has_freq = "freq_set_hz" in df.columns
+                        spec = parse_sweep_spec_from_name(test_name)
+                        if has_freq or (spec and spec.duration_s > 0):
+                            sdf = prepare_sweep_data(
+                                ts, tc, sc,
+                                spec=spec,
+                                parse_time=(tfmt == "absolute_timestamp"),
+                                full_df=df if has_freq else None,
+                            )
+                            bar_sweep_raw[bar_name][test_name] = sdf
+                            try:
+                                b = bin_by_frequency(
+                                    sdf, value_col=sc,
+                                    freq_col="Frequency",
+                                    bin_hz=S["bin_hz"],
+                                )
+                                bar_sweep_binned[bar_name][test_name] = b
+                            except Exception as be:
+                                load_errors.append(
+                                    f"{bar_name}/{test_name}: bin — {be}"
+                                )
+                        else:
+                            bar_const_data[bar_name][test_name] = ts
+                    else:
+                        bar_const_data[bar_name][test_name] = ts
 
-    except Exception as e:
-        st.error(f"❌ **CRITICAL ERROR:** {str(e)}")
-        with st.expander("🔍 Debug Information"):
-            st.code(traceback.format_exc())
+                except Exception as e:
+                    load_errors.append(f"{bar_name}/{test_name}: {e}")
+
+    if load_errors:
+        with st.expander(f"⚠️ {len(load_errors)} issue(s)", expanded=False):
+            for e in load_errors:
+                st.warning(e)
+
+    if signal_col is None:
+        signal_col = "flow"
+
+    n_sw = sum(1 for v in bar_sweep_binned.values() if v)
+    n_cf = sum(1 for v in bar_const_data.values() if v)
+    total = sum(
+        len(bar_sweep_binned.get(b, {})) + len(bar_const_data.get(b, {}))
+        for b in selected_bar_names
+    )
+
+    if total == 0:
+        st.error(
+            "❌ No data loaded.  Check the data folder path "
+            "and bar test assignments."
+        )
+        return
+
+    st.success(
+        f"✅ **{total}** tests across **{len(selected_bar_names)}** bars — "
+        f"**{n_sw}** sweep, **{n_cf}** constant"
+    )
+
+    # ── Mixed-type warning for bars ─────────────────────────────
+    if n_sw > 0 and n_cf > 0:
+        st.warning(
+            "⚠️ Some bars contain a mix of sweep and constant-frequency "
+            "tests.  Results are shown separately by test type below."
+        )
+
+    # ── Bar inventory ───────────────────────────────────────────
+    with st.expander("📋 Bar contents", expanded=False):
+        for bar_name in selected_bar_names:
+            sw = list(bar_sweep_binned.get(bar_name, {}).keys())
+            cf = list(bar_const_data.get(bar_name, {}).keys())
+            st.markdown(f"**{bar_name}**")
+            if sw:
+                st.markdown(
+                    f"  - Sweep ({len(sw)}): "
+                    + ", ".join(f"`{t}`" for t in sw)
+                )
+            if cf:
+                st.markdown(
+                    f"  - Constant ({len(cf)}): "
+                    + ", ".join(f"`{t}`" for t in cf)
+                )
+            if not sw and not cf:
+                st.markdown("  - _no loaded tests_")
+
+    # ── Bar comparison tabs ─────────────────────────────────────
+    tab_labels: list[str] = []
+    if n_sw:
+        tab_labels += ["🔀 Sweep Overlay", "📏 Sweep Relative"]
+    if n_cf:
+        tab_labels += ["📦 Const Boxplots", "📊 Const Histograms"]
+    tab_labels.append("📋 Summary")
+
+    btabs = st.tabs(tab_labels)
+    ti = 0
+
+    # Sweep tabs
+    if n_sw:
+        with btabs[ti]:
+            st.subheader("Frequency Sweep — Bar Comparison")
+            show_indiv = st.checkbox(
+                "Show individual test traces",
+                value=False,
+                key="cb_indiv",
+            )
+            fig = plot_bar_sweep_overlay(
+                bar_sweep_binned,
+                show_error_bars=S["err_bars"],
+                show_individual=show_indiv,
+                mode=S["plot_mode"],
+                marker_size=S["marker_sz"],
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            _maybe_export(fig, "bar_sweep_overlay.html", S)
+        ti += 1
+
+        with btabs[ti]:
+            st.subheader("Relative (0–100 %) — Bar Comparison")
+            fig = plot_bar_sweep_relative(
+                bar_sweep_binned,
+                mode=S["plot_mode"],
+                marker_size=S["marker_sz"],
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        ti += 1
+
+    # Constant tabs
+    if n_cf:
+        with btabs[ti]:
+            st.subheader("Constant-Frequency — Bar Comparison")
+            view = st.radio(
+                "View",
+                ["Per-test (grouped by bar)", "Aggregated per bar"],
+                horizontal=True,
+                key="cb_const_view",
+            )
+            if view.startswith("Per"):
+                fig = plot_bar_constant_boxplots(
+                    bar_const_data, signal_col=signal_col,
+                )
+            else:
+                fig = plot_bar_constant_aggregated(
+                    bar_const_data, signal_col=signal_col,
+                )
+            st.plotly_chart(fig, use_container_width=True)
+        ti += 1
+
+        with btabs[ti]:
+            st.subheader("Constant-Frequency Histograms")
+            nbins = st.slider("Bins", 10, 200, 50, key="cb_hbins")
+            fig = plot_bar_constant_histograms(
+                bar_const_data, signal_col=signal_col, nbins=nbins,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        ti += 1
+
+    # Summary table
+    with btabs[ti]:
+        st.subheader("Summary Statistics per Bar")
+        dfs: list[pd.DataFrame] = []
+        if n_sw:
+            pool = {b: t for b, t in bar_sweep_raw.items() if t}
+            if pool:
+                dfs.append(
+                    build_bar_summary_table(
+                        pool, signal_col=signal_col, test_type="Sweep",
+                    )
+                )
+        if n_cf:
+            pool = {b: t for b, t in bar_const_data.items() if t}
+            if pool:
+                dfs.append(
+                    build_bar_summary_table(
+                        pool, signal_col=signal_col, test_type="Constant",
+                    )
+                )
+        if dfs:
+            summary = pd.concat(dfs, ignore_index=True)
+            st.dataframe(
+                summary,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "CV (%)": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
+        else:
+            st.info("No data available for summary.")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# MODE 3 — MANAGE GROUPS
+# ════════════════════════════════════════════════════════════════════════
+
+def _render_manage_groups(run_names: list[str]) -> None:
+    """CRUD interface for bars, shipments, and test groups."""
+    mgr_tabs = st.tabs(["📦 Bars", "🚚 Shipments", "📋 Test Groups"])
+    store = _get_store()
+
+    # ── Bars ────────────────────────────────────────────────────
+    with mgr_tabs[0]:
+        st.subheader("📦 Bars")
+        st.caption(
+            "A **bar** groups test folders belonging to the same pump."
+        )
+
+        if store.bars:
+            for bname, bar in list(store.bars.items()):
+                with st.expander(
+                    f"**{bname}** — {len(bar.tests)} test(s)",
+                    expanded=False,
+                ):
+                    st.markdown(
+                        f"*{bar.description}*"
+                        if bar.description
+                        else "_No description._"
+                    )
+                    for t in bar.tests:
+                        st.markdown(f"- `{t}`")
+
+                    if run_names:
+                        new_tests = st.multiselect(
+                            "Tests",
+                            run_names,
+                            default=[t for t in bar.tests if t in run_names],
+                            key=f"be_{bname}",
+                        )
+                        new_desc = st.text_input(
+                            "Description",
+                            bar.description,
+                            key=f"bd_{bname}",
+                        )
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            if st.button("💾 Save", key=f"bs_{bname}"):
+                                bar.tests = new_tests
+                                bar.description = new_desc
+                                _persist()
+                                st.success(f"Updated **{bname}**")
+                                st.rerun()
+                        with c2:
+                            if st.button(
+                                "🗑️ Delete",
+                                key=f"bx_{bname}",
+                                type="secondary",
+                            ):
+                                remove_bar(store, bname)
+                                _persist()
+                                st.rerun()
+                    else:
+                        st.info(
+                            "Enter a data folder path in the sidebar "
+                            "to enable test selection."
+                        )
+        else:
+            st.info("No bars yet.")
+
+        st.markdown("---")
+        st.markdown("#### ➕ New Bar")
+        with st.form("new_bar", clear_on_submit=True):
+            nb_name = st.text_input("Name", placeholder="e.g. Bar 1")
+            nb_desc = st.text_input(
+                "Description", placeholder="e.g. Pump serial #1234",
+            )
+            nb_tests = (
+                st.multiselect("Tests", run_names, key="nb_tests")
+                if run_names
+                else []
+            )
+            if not run_names:
+                st.info(
+                    "Enter a data folder path in the sidebar to assign tests."
+                )
+            if st.form_submit_button("Create"):
+                if not nb_name.strip():
+                    st.error("Name required.")
+                elif nb_name in store.bars:
+                    st.error(f"A bar named **{nb_name}** already exists.")
+                else:
+                    add_bar(store, Bar(nb_name, nb_tests, nb_desc))
+                    _persist()
+                    st.success(
+                        f"Created **{nb_name}** with {len(nb_tests)} test(s)."
+                    )
+                    st.rerun()
+
+    # ── Shipments ───────────────────────────────────────────────
+    with mgr_tabs[1]:
+        st.subheader("🚚 Shipments")
+        st.caption(
+            "A **shipment** groups bars under a recipient label."
+        )
+        bar_list = list(store.bars.keys())
+
+        if store.shipments:
+            for sname, ship in list(store.shipments.items()):
+                with st.expander(
+                    f"**{sname}** — {ship.recipient or '—'} "
+                    f"— {len(ship.bars)} bar(s)",
+                    expanded=False,
+                ):
+                    st.markdown(f"**Recipient:** {ship.recipient or '—'}")
+                    st.markdown(
+                        f"**Description:** {ship.description or '—'}"
+                    )
+                    for b in ship.bars:
+                        n = (
+                            len(store.bars[b].tests)
+                            if b in store.bars
+                            else "?"
+                        )
+                        st.markdown(f"- **{b}** ({n} tests)")
+
+                    if bar_list:
+                        new_bars = st.multiselect(
+                            "Bars",
+                            bar_list,
+                            default=[
+                                b for b in ship.bars if b in bar_list
+                            ],
+                            key=f"se_{sname}",
+                        )
+                        new_recip = st.text_input(
+                            "Recipient",
+                            ship.recipient,
+                            key=f"sr_{sname}",
+                        )
+                        new_desc = st.text_input(
+                            "Description",
+                            ship.description,
+                            key=f"sd_{sname}",
+                        )
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            if st.button("💾 Save", key=f"ss_{sname}"):
+                                ship.bars = new_bars
+                                ship.recipient = new_recip
+                                ship.description = new_desc
+                                _persist()
+                                st.success(f"Updated **{sname}**")
+                                st.rerun()
+                        with c2:
+                            if st.button(
+                                "🗑️ Delete",
+                                key=f"sx_{sname}",
+                                type="secondary",
+                            ):
+                                remove_shipment(store, sname)
+                                _persist()
+                                st.rerun()
+        else:
+            st.info("No shipments yet.")
+
+        st.markdown("---")
+        st.markdown("#### ➕ New Shipment")
+        with st.form("new_ship", clear_on_submit=True):
+            ns_name = st.text_input(
+                "Name", placeholder="e.g. Niels' bars",
+            )
+            ns_recip = st.text_input(
+                "Recipient", placeholder="e.g. Niels",
+            )
+            ns_desc = st.text_input("Description")
+            ns_bars = (
+                st.multiselect("Bars", bar_list, key="ns_bars")
+                if bar_list
+                else []
+            )
+            if not bar_list:
+                st.info("Create bars first before making a shipment.")
+            if st.form_submit_button("Create"):
+                if not ns_name.strip():
+                    st.error("Name required.")
+                elif ns_name in store.shipments:
+                    st.error(
+                        f"A shipment named **{ns_name}** already exists."
+                    )
+                else:
+                    add_shipment(
+                        store,
+                        Shipment(ns_name, ns_bars, ns_recip, ns_desc),
+                    )
+                    _persist()
+                    st.success(f"Created shipment **{ns_name}**.")
+                    st.rerun()
+
+    # ── Test Groups ─────────────────────────────────────────────
+    with mgr_tabs[2]:
+        st.subheader("📋 Test Groups")
+        st.caption(
+            "A **test group** is a saved collection of test folders "
+            "for quick re-comparison."
+        )
+
+        if store.test_groups:
+            for gname, grp in list(store.test_groups.items()):
+                with st.expander(
+                    f"**{gname}** — {len(grp.tests)} test(s)",
+                    expanded=False,
+                ):
+                    st.markdown(
+                        f"*{grp.description}*"
+                        if grp.description
+                        else "_No description._"
+                    )
+                    for t in grp.tests:
+                        st.markdown(f"- `{t}`")
+
+                    if run_names:
+                        new_tests = st.multiselect(
+                            "Tests",
+                            run_names,
+                            default=[
+                                t for t in grp.tests if t in run_names
+                            ],
+                            key=f"ge_{gname}",
+                        )
+                        new_desc = st.text_input(
+                            "Description",
+                            grp.description,
+                            key=f"gd_{gname}",
+                        )
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            if st.button("💾 Save", key=f"gs_{gname}"):
+                                grp.tests = new_tests
+                                grp.description = new_desc
+                                _persist()
+                                st.success(f"Updated **{gname}**")
+                                st.rerun()
+                        with c2:
+                            if st.button(
+                                "🗑️ Delete",
+                                key=f"gx_{gname}",
+                                type="secondary",
+                            ):
+                                remove_test_group(store, gname)
+                                _persist()
+                                st.rerun()
+                    else:
+                        st.info(
+                            "Enter a data folder path in the sidebar "
+                            "to edit test assignments."
+                        )
+        else:
+            st.info("No test groups yet.")
+
+        st.markdown("---")
+        st.markdown("#### ➕ New Test Group")
+        with st.form("new_tgrp", clear_on_submit=True):
+            ng_name = st.text_input(
+                "Name", placeholder="e.g. March sweep tests",
+            )
+            ng_desc = st.text_input("Description")
+            ng_tests = (
+                st.multiselect("Tests", run_names, key="ng_tests")
+                if run_names
+                else []
+            )
+            if not run_names:
+                st.info(
+                    "Enter a data folder path in the sidebar to assign tests."
+                )
+            if st.form_submit_button("Create"):
+                if not ng_name.strip():
+                    st.error("Name required.")
+                elif ng_name in store.test_groups:
+                    st.error(
+                        f"A test group named **{ng_name}** already exists."
+                    )
+                else:
+                    add_test_group(
+                        store, TestGroup(ng_name, ng_tests, ng_desc),
+                    )
+                    _persist()
+                    st.success(
+                        f"Created **{ng_name}** "
+                        f"with {len(ng_tests)} test(s)."
+                    )
+                    st.rerun()
