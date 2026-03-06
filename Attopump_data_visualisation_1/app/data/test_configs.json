@@ -1,0 +1,77 @@
+{
+  "_description": "User-defined test configurations.",
+  "tests": {
+    "Constant830_Pump2_Niels_20260225_160054_0001": {
+      "test_type": "constant",
+      "frequency_hz": 830.0,
+      "start_hz": null,
+      "end_hz": null,
+      "duration_s": null,
+      "note": ""
+    },
+    "Constant500Hz_Pump2_Niels_20260225_145652_0001": {
+      "test_type": "constant",
+      "frequency_hz": 500.0,
+      "start_hz": null,
+      "end_hz": null,
+      "duration_s": null,
+      "note": ""
+    },
+    "20260302-1710-PUMP-20260302-5": {
+      "test_type": "constant",
+      "frequency_hz": 500.0,
+      "start_hz": null,
+      "end_hz": null,
+      "duration_s": null,
+      "note": ""
+    },
+    "Data_20260304_190431_0001": {
+      "test_type": "constant",
+      "frequency_hz": 500.0,
+      "start_hz": null,
+      "end_hz": null,
+      "duration_s": null,
+      "note": ""
+    },
+    "Data_20260304_173401_0001": {
+      "test_type": "constant",
+      "frequency_hz": 504.0,
+      "start_hz": null,
+      "end_hz": null,
+      "duration_s": null,
+      "note": ""
+    },
+    "Data_20260304_170216_0001": {
+      "test_type": "constant",
+      "frequency_hz": 504.0,
+      "start_hz": null,
+      "end_hz": null,
+      "duration_s": null,
+      "note": ""
+    },
+    "Constant500_Pump7_Niels_20260303_151910_0001": {
+      "test_type": "constant",
+      "frequency_hz": 500.0,
+      "start_hz": null,
+      "end_hz": null,
+      "duration_s": null,
+      "note": ""
+    },
+    "Constant500_Pump8_Niels_20260303_154533_0001": {
+      "test_type": "constant",
+      "frequency_hz": 500.0,
+      "start_hz": null,
+      "end_hz": null,
+      "duration_s": null,
+      "note": ""
+    },
+    "20260306-1454-500Hz-Pump-20260227-1": {
+      "test_type": "constant",
+      "frequency_hz": 500.0,
+      "start_hz": null,
+      "end_hz": null,
+      "duration_s": null,
+      "note": ""
+    }
+  }
+}

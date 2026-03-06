@@ -1,7 +1,7 @@
-"""Unified Comprehensive Analysis page — compare tests, bars, manage groups.
+"""Unified Comprehensive Analysis page — compare tests and pumps.
 
-This page consolidates all multi-test and multi-bar comparison into a
-single interface with three modes:
+This page consolidates all multi-test and multi-pump comparison into a
+single interface with two modes:
 
 Modes
 -----
@@ -10,10 +10,8 @@ Modes
    selection mixes constant-frequency and sweep tests, the page warns
    and optionally extracts sweep data at the matching frequency.
 
-2. **Compare Bars** — select bars (pump groups) or a shipment and
+2. **Compare Pumps** — select pumps or a shipment and
    compare aggregated results across pumps.
-
-3. **Manage Groups** — CRUD for bars, shipments, and test groups.
 
 Inputs
 ------
@@ -60,17 +58,10 @@ from ..data.data_processor import (
     prepare_time_series_data,
 )
 from ..data.bar_groups import (
-    Bar,
     BarGroupsStore,
-    Shipment,
     TestGroup,
-    add_bar,
-    add_shipment,
     add_test_group,
     load_bar_groups,
-    remove_bar,
-    remove_shipment,
-    remove_test_group,
     save_bar_groups,
 )
 from ..plots.analysis_plots import (
@@ -95,6 +86,7 @@ from ..plots.bar_comparison_plots import (
     plot_bar_sweep_relative,
 )
 from ..plots.plot_generator import export_html, plot_sweep_binned
+from .unknown_test_prompt import classify_tests_quick, render_unknown_test_prompt
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -226,7 +218,7 @@ def main() -> None:  # noqa: C901
         # ── Mode selector ──────────────────────────────────────
         mode = st.radio(
             "What would you like to do?",
-            ["📊 Compare Tests", "📦 Compare Bars", "🛠️ Manage Groups"],
+            ["📊 Compare Tests", "📦 Compare Pumps"],
             horizontal=True,
             key="a_toplevel",
         )
@@ -234,10 +226,8 @@ def main() -> None:  # noqa: C901
 
         if mode == "📊 Compare Tests":
             _render_compare_tests(S, run_dirs, run_names)
-        elif mode == "📦 Compare Bars":
-            _render_compare_bars(S, run_dirs, run_names)
         else:
-            _render_manage_groups(run_names)
+            _render_compare_bars(S, run_dirs, run_names)
 
     except Exception as e:
         st.error(f"❌ **CRITICAL ERROR:** {str(e)}")
@@ -268,7 +258,7 @@ def _render_compare_tests(
     if sel == "Load a saved test group":
         if not store.test_groups:
             st.info(
-                "No saved test groups yet.  Create one in **Manage Groups**, "
+                "No saved test groups yet.  Create one on the **Manage Groups** page, "
                 "or pick tests manually."
             )
             return
@@ -321,6 +311,19 @@ def _render_compare_tests(
                     )
                 else:
                     st.error("Name required.")
+
+    # ── Check for unclassified tests ───────────────────────────
+    _, unknowns = classify_tests_quick(selected_names, run_dirs, run_names)
+    if unknowns:
+        all_classified = render_unknown_test_prompt(
+            unknowns, run_dirs, run_names, key_prefix="ct_utp",
+        )
+        if not all_classified:
+            st.info(
+                "💡 Classify the unknown test(s) above, then the "
+                "analysis will load automatically."
+            )
+            return
 
     # ── Load data ───────────────────────────────────────────────
     data = _load_tests(selected_names, run_dirs, run_names, S)
@@ -473,7 +476,7 @@ def _load_tests(
                 all_data[name] = ts_df
 
                 # Classify
-                ttype, _, _ = detect_test_type(name, df)
+                ttype, _, _ = detect_test_type(name, df, data_root=run_dir.parent)
                 test_types[name] = ttype
                 has_freq = "freq_set_hz" in df.columns
 
@@ -500,13 +503,21 @@ def _load_tests(
                     else:
                         # Sweep by name but no usable freq data → treat as const
                         const_data[name] = ts_df
-                        cf = detect_constant_frequency(df, name)
+                        cf = detect_constant_frequency(
+                            df,
+                            name,
+                            data_root=run_dir.parent,
+                        )
                         if cf:
                             const_freqs[name] = cf
                 else:
                     # ── Constant frequency path ─────────────────────────
                     const_data[name] = ts_df
-                    cf = detect_constant_frequency(df, name)
+                    cf = detect_constant_frequency(
+                        df,
+                        name,
+                        data_root=run_dir.parent,
+                    )
                     if cf:
                         const_freqs[name] = cf
 
@@ -857,25 +868,25 @@ def _render_mixed_comparison(
 
 
 # ════════════════════════════════════════════════════════════════════════
-# MODE 2 — COMPARE BARS
+# MODE 2 — COMPARE PUMPS
 # ════════════════════════════════════════════════════════════════════════
 
 def _render_compare_bars(
     S: dict, run_dirs: list, run_names: list[str],
 ) -> None:
-    """Compare Bars mode — select bars or shipment, load, compare."""
+    """Compare Pumps mode — select pumps or shipment, load, compare."""
     store = _get_store()
 
     if not store.bars:
         st.info(
-            "No bars defined yet.  Switch to **Manage Groups** to create bars."
+            "No pumps defined yet.  Go to the **Manage Groups** page to create pumps."
         )
         return
 
     # ── Selection ───────────────────────────────────────────────
     sel = st.radio(
-        "How would you like to select bars?",
-        ["Pick bars manually", "Load a saved shipment"],
+        "How would you like to select pumps?",
+        ["Pick pumps manually", "Load a saved shipment"],
         horizontal=True,
         key="cb_sel",
     )
@@ -885,8 +896,8 @@ def _render_compare_bars(
     if sel == "Load a saved shipment":
         if not store.shipments:
             st.info(
-                "No shipments saved.  Create one in Manage Groups, "
-                "or pick bars manually."
+                "No shipments saved.  Create one on the **Manage Groups** page, "
+                "or pick pumps manually."
             )
             return
         opts = list(store.shipments.keys())
@@ -905,20 +916,39 @@ def _render_compare_bars(
         st.markdown(
             f"**Shipment:** {ship.name}  ·  "
             f"**Recipient:** {ship.recipient or '—'}  ·  "
-            f"**Bars:** {', '.join(selected_bar_names) or 'none'}"
+            f"**Pumps:** {', '.join(selected_bar_names) or 'none'}"
         )
     else:
         selected_bar_names = st.multiselect(
-            "📦 Bars to compare",
+            "� Pumps to compare",
             list(store.bars.keys()),
             key="cb_bars",
         )
 
     if not selected_bar_names:
-        st.info("👆 Select at least one bar.")
+        st.info("👆 Select at least one pump.")
         return
     if len(selected_bar_names) < 2:
-        st.warning("Select **≥ 2 bars** for meaningful comparison.")
+        st.warning("Select **≥ 2 pumps** for meaningful comparison.")
+
+    # ── Check for unclassified tests across bars ───────────────
+    all_bar_tests = []
+    for bn in selected_bar_names:
+        all_bar_tests.extend(
+            t for t in store.bars[bn].tests if t in run_names
+        )
+    if all_bar_tests:
+        _, unknowns = classify_tests_quick(all_bar_tests, run_dirs, run_names)
+        if unknowns:
+            all_classified = render_unknown_test_prompt(
+                unknowns, run_dirs, run_names, key_prefix="cb_utp",
+            )
+            if not all_classified:
+                st.info(
+                    "💡 Classify the unknown test(s) above, then the "
+                    "comparison will load automatically."
+                )
+                return
 
     # ── Load bar data ───────────────────────────────────────────
     run_map = {p.name: p for p in run_dirs}
@@ -928,7 +958,7 @@ def _render_compare_bars(
     load_errors: list[str] = []
     signal_col: str | None = None
 
-    with st.spinner(f"Loading {len(selected_bar_names)} bar(s)…"):
+    with st.spinner(f"Loading {len(selected_bar_names)} pump(s)…"):
         for bar_name in selected_bar_names:
             bar = store.bars[bar_name]
             bar_sweep_binned[bar_name] = {}
@@ -965,7 +995,11 @@ def _render_compare_bars(
                         parse_time=(tfmt == "absolute_timestamp"),
                     )
 
-                    ttype, _, _ = detect_test_type(test_name, df)
+                    ttype, _, _ = detect_test_type(
+                        test_name,
+                        df,
+                        data_root=run_map[test_name].parent,
+                    )
                     if ttype == "sweep":
                         has_freq = "freq_set_hz" in df.columns
                         spec = parse_sweep_spec_from_name(test_name)
@@ -1014,24 +1048,24 @@ def _render_compare_bars(
     if total == 0:
         st.error(
             "❌ No data loaded.  Check the data folder path "
-            "and bar test assignments."
+            "and pump test assignments."
         )
         return
 
     st.success(
-        f"✅ **{total}** tests across **{len(selected_bar_names)}** bars — "
+        f"✅ **{total}** tests across **{len(selected_bar_names)}** pumps — "
         f"**{n_sw}** sweep, **{n_cf}** constant"
     )
 
-    # ── Mixed-type warning for bars ─────────────────────────────
+    # ── Mixed-type warning for pumps ─────────────────────────────
     if n_sw > 0 and n_cf > 0:
         st.warning(
-            "⚠️ Some bars contain a mix of sweep and constant-frequency "
+            "⚠️ Some pumps contain a mix of sweep and constant-frequency "
             "tests.  Results are shown separately by test type below."
         )
 
-    # ── Bar inventory ───────────────────────────────────────────
-    with st.expander("📋 Bar contents", expanded=False):
+    # ── Pump inventory ───────────────────────────────────────────
+    with st.expander("📋 Pump contents", expanded=False):
         for bar_name in selected_bar_names:
             sw = list(bar_sweep_binned.get(bar_name, {}).keys())
             cf = list(bar_const_data.get(bar_name, {}).keys())
@@ -1049,7 +1083,7 @@ def _render_compare_bars(
             if not sw and not cf:
                 st.markdown("  - _no loaded tests_")
 
-    # ── Bar comparison tabs ─────────────────────────────────────
+    # ── Pump comparison tabs ─────────────────────────────────────
     tab_labels: list[str] = []
     if n_sw:
         tab_labels += ["🔀 Sweep Overlay", "📏 Sweep Relative"]
@@ -1063,7 +1097,7 @@ def _render_compare_bars(
     # Sweep tabs
     if n_sw:
         with btabs[ti]:
-            st.subheader("Frequency Sweep — Bar Comparison")
+            st.subheader("Frequency Sweep — Pump Comparison")
             show_indiv = st.checkbox(
                 "Show individual test traces",
                 value=False,
@@ -1077,11 +1111,11 @@ def _render_compare_bars(
                 marker_size=S["marker_sz"],
             )
             st.plotly_chart(fig, use_container_width=True)
-            _maybe_export(fig, "bar_sweep_overlay.html", S)
+            _maybe_export(fig, "pump_sweep_overlay.html", S)
         ti += 1
 
         with btabs[ti]:
-            st.subheader("Relative (0–100 %) — Bar Comparison")
+            st.subheader("Relative (0–100 %) — Pump Comparison")
             fig = plot_bar_sweep_relative(
                 bar_sweep_binned,
                 mode=S["plot_mode"],
@@ -1093,10 +1127,10 @@ def _render_compare_bars(
     # Constant tabs
     if n_cf:
         with btabs[ti]:
-            st.subheader("Constant-Frequency — Bar Comparison")
+            st.subheader("Constant-Frequency — Pump Comparison")
             view = st.radio(
                 "View",
-                ["Per-test (grouped by bar)", "Aggregated per bar"],
+                ["Per-test (grouped by pump)", "Aggregated per pump"],
                 horizontal=True,
                 key="cb_const_view",
             )
@@ -1122,7 +1156,7 @@ def _render_compare_bars(
 
     # Summary table
     with btabs[ti]:
-        st.subheader("Summary Statistics per Bar")
+        st.subheader("Summary Statistics per Pump")
         dfs: list[pd.DataFrame] = []
         if n_sw:
             pool = {b: t for b, t in bar_sweep_raw.items() if t}
@@ -1152,295 +1186,3 @@ def _render_compare_bars(
             )
         else:
             st.info("No data available for summary.")
-
-
-# ════════════════════════════════════════════════════════════════════════
-# MODE 3 — MANAGE GROUPS
-# ════════════════════════════════════════════════════════════════════════
-
-def _render_manage_groups(run_names: list[str]) -> None:
-    """CRUD interface for bars, shipments, and test groups."""
-    mgr_tabs = st.tabs(["📦 Bars", "🚚 Shipments", "📋 Test Groups"])
-    store = _get_store()
-
-    # ── Bars ────────────────────────────────────────────────────
-    with mgr_tabs[0]:
-        st.subheader("📦 Bars")
-        st.caption(
-            "A **bar** groups test folders belonging to the same pump."
-        )
-
-        if store.bars:
-            for bname, bar in list(store.bars.items()):
-                with st.expander(
-                    f"**{bname}** — {len(bar.tests)} test(s)",
-                    expanded=False,
-                ):
-                    st.markdown(
-                        f"*{bar.description}*"
-                        if bar.description
-                        else "_No description._"
-                    )
-                    for t in bar.tests:
-                        st.markdown(f"- `{t}`")
-
-                    if run_names:
-                        new_tests = st.multiselect(
-                            "Tests",
-                            run_names,
-                            default=[t for t in bar.tests if t in run_names],
-                            key=f"be_{bname}",
-                        )
-                        new_desc = st.text_input(
-                            "Description",
-                            bar.description,
-                            key=f"bd_{bname}",
-                        )
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            if st.button("💾 Save", key=f"bs_{bname}"):
-                                bar.tests = new_tests
-                                bar.description = new_desc
-                                _persist()
-                                st.success(f"Updated **{bname}**")
-                                st.rerun()
-                        with c2:
-                            if st.button(
-                                "🗑️ Delete",
-                                key=f"bx_{bname}",
-                                type="secondary",
-                            ):
-                                remove_bar(store, bname)
-                                _persist()
-                                st.rerun()
-                    else:
-                        st.info(
-                            "Enter a data folder path in the sidebar "
-                            "to enable test selection."
-                        )
-        else:
-            st.info("No bars yet.")
-
-        st.markdown("---")
-        st.markdown("#### ➕ New Bar")
-        with st.form("new_bar", clear_on_submit=True):
-            nb_name = st.text_input("Name", placeholder="e.g. Bar 1")
-            nb_desc = st.text_input(
-                "Description", placeholder="e.g. Pump serial #1234",
-            )
-            nb_tests = (
-                st.multiselect("Tests", run_names, key="nb_tests")
-                if run_names
-                else []
-            )
-            if not run_names:
-                st.info(
-                    "Enter a data folder path in the sidebar to assign tests."
-                )
-            if st.form_submit_button("Create"):
-                if not nb_name.strip():
-                    st.error("Name required.")
-                elif nb_name in store.bars:
-                    st.error(f"A bar named **{nb_name}** already exists.")
-                else:
-                    add_bar(store, Bar(nb_name, nb_tests, nb_desc))
-                    _persist()
-                    st.success(
-                        f"Created **{nb_name}** with {len(nb_tests)} test(s)."
-                    )
-                    st.rerun()
-
-    # ── Shipments ───────────────────────────────────────────────
-    with mgr_tabs[1]:
-        st.subheader("🚚 Shipments")
-        st.caption(
-            "A **shipment** groups bars under a recipient label."
-        )
-        bar_list = list(store.bars.keys())
-
-        if store.shipments:
-            for sname, ship in list(store.shipments.items()):
-                with st.expander(
-                    f"**{sname}** — {ship.recipient or '—'} "
-                    f"— {len(ship.bars)} bar(s)",
-                    expanded=False,
-                ):
-                    st.markdown(f"**Recipient:** {ship.recipient or '—'}")
-                    st.markdown(
-                        f"**Description:** {ship.description or '—'}"
-                    )
-                    for b in ship.bars:
-                        n = (
-                            len(store.bars[b].tests)
-                            if b in store.bars
-                            else "?"
-                        )
-                        st.markdown(f"- **{b}** ({n} tests)")
-
-                    if bar_list:
-                        new_bars = st.multiselect(
-                            "Bars",
-                            bar_list,
-                            default=[
-                                b for b in ship.bars if b in bar_list
-                            ],
-                            key=f"se_{sname}",
-                        )
-                        new_recip = st.text_input(
-                            "Recipient",
-                            ship.recipient,
-                            key=f"sr_{sname}",
-                        )
-                        new_desc = st.text_input(
-                            "Description",
-                            ship.description,
-                            key=f"sd_{sname}",
-                        )
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            if st.button("💾 Save", key=f"ss_{sname}"):
-                                ship.bars = new_bars
-                                ship.recipient = new_recip
-                                ship.description = new_desc
-                                _persist()
-                                st.success(f"Updated **{sname}**")
-                                st.rerun()
-                        with c2:
-                            if st.button(
-                                "🗑️ Delete",
-                                key=f"sx_{sname}",
-                                type="secondary",
-                            ):
-                                remove_shipment(store, sname)
-                                _persist()
-                                st.rerun()
-        else:
-            st.info("No shipments yet.")
-
-        st.markdown("---")
-        st.markdown("#### ➕ New Shipment")
-        with st.form("new_ship", clear_on_submit=True):
-            ns_name = st.text_input(
-                "Name", placeholder="e.g. Niels' bars",
-            )
-            ns_recip = st.text_input(
-                "Recipient", placeholder="e.g. Niels",
-            )
-            ns_desc = st.text_input("Description")
-            ns_bars = (
-                st.multiselect("Bars", bar_list, key="ns_bars")
-                if bar_list
-                else []
-            )
-            if not bar_list:
-                st.info("Create bars first before making a shipment.")
-            if st.form_submit_button("Create"):
-                if not ns_name.strip():
-                    st.error("Name required.")
-                elif ns_name in store.shipments:
-                    st.error(
-                        f"A shipment named **{ns_name}** already exists."
-                    )
-                else:
-                    add_shipment(
-                        store,
-                        Shipment(ns_name, ns_bars, ns_recip, ns_desc),
-                    )
-                    _persist()
-                    st.success(f"Created shipment **{ns_name}**.")
-                    st.rerun()
-
-    # ── Test Groups ─────────────────────────────────────────────
-    with mgr_tabs[2]:
-        st.subheader("📋 Test Groups")
-        st.caption(
-            "A **test group** is a saved collection of test folders "
-            "for quick re-comparison."
-        )
-
-        if store.test_groups:
-            for gname, grp in list(store.test_groups.items()):
-                with st.expander(
-                    f"**{gname}** — {len(grp.tests)} test(s)",
-                    expanded=False,
-                ):
-                    st.markdown(
-                        f"*{grp.description}*"
-                        if grp.description
-                        else "_No description._"
-                    )
-                    for t in grp.tests:
-                        st.markdown(f"- `{t}`")
-
-                    if run_names:
-                        new_tests = st.multiselect(
-                            "Tests",
-                            run_names,
-                            default=[
-                                t for t in grp.tests if t in run_names
-                            ],
-                            key=f"ge_{gname}",
-                        )
-                        new_desc = st.text_input(
-                            "Description",
-                            grp.description,
-                            key=f"gd_{gname}",
-                        )
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            if st.button("💾 Save", key=f"gs_{gname}"):
-                                grp.tests = new_tests
-                                grp.description = new_desc
-                                _persist()
-                                st.success(f"Updated **{gname}**")
-                                st.rerun()
-                        with c2:
-                            if st.button(
-                                "🗑️ Delete",
-                                key=f"gx_{gname}",
-                                type="secondary",
-                            ):
-                                remove_test_group(store, gname)
-                                _persist()
-                                st.rerun()
-                    else:
-                        st.info(
-                            "Enter a data folder path in the sidebar "
-                            "to edit test assignments."
-                        )
-        else:
-            st.info("No test groups yet.")
-
-        st.markdown("---")
-        st.markdown("#### ➕ New Test Group")
-        with st.form("new_tgrp", clear_on_submit=True):
-            ng_name = st.text_input(
-                "Name", placeholder="e.g. March sweep tests",
-            )
-            ng_desc = st.text_input("Description")
-            ng_tests = (
-                st.multiselect("Tests", run_names, key="ng_tests")
-                if run_names
-                else []
-            )
-            if not run_names:
-                st.info(
-                    "Enter a data folder path in the sidebar to assign tests."
-                )
-            if st.form_submit_button("Create"):
-                if not ng_name.strip():
-                    st.error("Name required.")
-                elif ng_name in store.test_groups:
-                    st.error(
-                        f"A test group named **{ng_name}** already exists."
-                    )
-                else:
-                    add_test_group(
-                        store, TestGroup(ng_name, ng_tests, ng_desc),
-                    )
-                    _persist()
-                    st.success(
-                        f"Created **{ng_name}** "
-                        f"with {len(ng_tests)} test(s)."
-                    )
-                    st.rerun()

@@ -55,6 +55,7 @@ from .config import (
     TIME_COLUMN_CANDIDATES,
     TIME_PARSE_ERROR_HANDLING,
 )
+from .experiment_log import lookup_experiment_log_entry
 
 # ============================================================================
 # TEST METADATA (loaded once, cached)
@@ -116,22 +117,33 @@ def save_user_patterns(patterns: list[str]) -> None:
 def detect_test_type(
     run_name: str,
     df: pd.DataFrame | None = None,
+    data_root: str | Path | None = None,
 ) -> tuple[str, str, dict | None]:
     """Determine test type using data-first detection hierarchy.
 
     Priority:
+      0. Check saved test configuration (``test_configs.json``)
       1. Check ``freq_set_hz`` column – 1 unique value ⇒ constant, >1 ⇒ sweep
-      2. Look up folder name in ``test_metadata.json``
-      3. Regex pattern matching on folder name (built-in + user patterns)
-      4. Default to "unknown"
+      2. Look up the shared experiment log
+      3. Look up folder name in ``test_metadata.json``
+      4. Regex pattern matching on folder name (built-in + user patterns)
+      5. Default to "unknown"
 
     Returns
     -------
     (test_type, detection_method, metadata_entry)
         test_type:        "constant" | "sweep" | "unknown"
-        detection_method: "freq_set_hz_column" | "metadata" | "regex" | "unknown"
+        detection_method: "freq_set_hz_column" | "experiment_log" |
+                          "metadata" | "regex" | "saved_config" | "unknown"
         metadata_entry:   dict from metadata file (or None)
     """
+    # ── Priority 0: saved test configuration ────────────────────────────
+    from .test_configs import get_test_config
+
+    saved_cfg = get_test_config(run_name)
+    if saved_cfg is not None:
+        return (saved_cfg.test_type, "saved_config", None)
+
     # ── Priority 1: freq_set_hz column in the data ──────────────────────
     if df is not None and "freq_set_hz" in df.columns:
         unique_freqs = df["freq_set_hz"].dropna().nunique()
@@ -140,7 +152,12 @@ def detect_test_type(
         else:
             return ("sweep", "freq_set_hz_column", None)
 
-    # ── Priority 2: metadata file ──────────────────────────────────────
+    # ── Priority 2: experiment log ─────────────────────────────────────
+    log_entry = lookup_experiment_log_entry(data_root, run_name)
+    if log_entry is not None and log_entry.inferred_test_type in ("constant", "sweep"):
+        return (log_entry.inferred_test_type, "experiment_log", None)
+
+    # ── Priority 3: metadata file ──────────────────────────────────────
     metadata = load_test_metadata()
     entry = metadata.get(run_name)
     if entry:
@@ -148,7 +165,7 @@ def detect_test_type(
         if test_type in ("constant", "sweep"):
             return (test_type, "metadata", entry)
 
-    # ── Priority 3: regex patterns (built-in + user) ──────────────────
+    # ── Priority 4: regex patterns (built-in + user) ──────────────────
     import re
 
     # Try built-in patterns first
@@ -164,7 +181,7 @@ def detect_test_type(
         except re.error:
             continue
 
-    # ── Priority 4: unknown ────────────────────────────────────────────
+    # ── Priority 5: unknown ────────────────────────────────────────────
     return ("unknown", "unknown", None)
 
 
@@ -539,10 +556,51 @@ def bin_by_frequency(
         .reset_index()
     )
 
+    # Single-point bins produce NaN std (ddof=1 with n=1). Fill with 0.
+    binned["std"] = binned["std"].fillna(0)
+
     binned["freq_center"] = binned["bin"].map(
         lambda i: float(centers[int(i)]) if int(i) < len(centers) else float(fmax)
     )
     return binned.sort_values("freq_center")
+
+
+def compute_frequency_average(
+    df: pd.DataFrame,
+    value_col: str,
+    freq_col: str = "Frequency",
+) -> pd.DataFrame:
+    """Compute mean and std of signal values at each unique frequency.
+
+    Groups the data by the frequency column and calculates per-frequency
+    statistics.  Handles single-point frequencies safely (std → 0 when
+    only one data point exists for that frequency).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with at least ``freq_col`` and ``value_col``.
+    value_col : str
+        Name of the signal / flow column.
+    freq_col : str
+        Name of the frequency column.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``freq``, ``mean``, ``std``, ``count``.
+        Sorted by ascending frequency.
+    """
+    out = df[[freq_col, value_col]].dropna().copy()
+    grouped = (
+        out.groupby(freq_col)[value_col]
+        .agg(["mean", "std", "count"])
+        .reset_index()
+    )
+    # Single-point frequencies: std is NaN (ddof=1), fill with 0.
+    grouped["std"] = grouped["std"].fillna(0)
+    grouped = grouped.rename(columns={freq_col: "freq"})
+    return grouped.sort_values("freq").reset_index(drop=True)
 
 
 def is_constant_frequency_test(run_name: str, df: pd.DataFrame | None = None) -> bool:
@@ -589,8 +647,10 @@ def prepare_constant_frequency_data(
     # Detect time format
     time_format = detect_time_format(df, time_col)
     
-    # Parse time ONLY if absolute timestamp
-    if parse_time and time_format == 'absolute_timestamp':
+    # Always parse absolute timestamps so elapsed-second arithmetic works.
+    # The `parse_time` flag is a UI hint; for internal math we MUST have
+    # numeric or datetime values.
+    if time_format == 'absolute_timestamp':
         out[time_col] = pd.to_datetime(out[time_col], errors=TIME_PARSE_ERROR_HANDLING)
     
     if drop_na:
@@ -657,6 +717,7 @@ def extract_frequency_slice(
 def detect_constant_frequency(
     df: pd.DataFrame,
     run_name: str = "",
+    data_root: str | Path | None = None,
 ) -> float | None:
     """Auto-detect the operating frequency of a constant-frequency test.
 
@@ -682,10 +743,17 @@ def detect_constant_frequency(
         unique = df["freq_set_hz"].dropna().unique()
         if len(unique) == 1:
             return float(unique[0])
-    # Priority 2: metadata file
+
+    # Priority 2: experiment log
+    log_entry = lookup_experiment_log_entry(data_root, run_name)
+    if log_entry is not None and log_entry.frequency_hz is not None:
+        return float(log_entry.frequency_hz)
+
+    # Priority 3: metadata file
     meta = load_test_metadata()
     entry = meta.get(run_name, {})
     if entry.get("frequency_hz"):
         return float(entry["frequency_hz"])
-    # Priority 3: config default
+
+    # Priority 4: config default
     return DEFAULT_CONSTANT_FREQUENCY_HZ

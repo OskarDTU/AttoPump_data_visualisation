@@ -35,6 +35,7 @@ Run with: ``streamlit run streamlit_app.py`` (this module is loaded
 lazily by the root entry point).
 """
 
+import plotly.graph_objects as go
 import streamlit as st
 import traceback
 
@@ -49,9 +50,11 @@ from ..data.config import (
     DEFAULT_CONSTANT_FREQUENCY_HZ,
     MAX_POINTS_DEFAULT,
     PLOT_BIN_WIDTH_HZ,
+    SweepSpec,
 )
 from ..data.data_processor import (
     bin_by_frequency,
+    compute_frequency_average,
     detect_test_type,
     detect_time_format,
     get_signal_columns,
@@ -66,6 +69,24 @@ from ..data.data_processor import (
     prepare_time_series_data,
     save_metadata_entry,
     save_user_patterns,
+)
+from ..data.test_configs import (
+    TestConfig,
+    delete_test_config,
+    get_test_config,
+    load_test_configs,
+    save_test_config,
+)
+from ..data.app_settings import (
+    AppSettings,
+    load_settings,
+    save_settings,
+)
+from ..data.test_catalog import (
+    format_classification_summary,
+    format_detection_method,
+    rank_test_names,
+    resolve_test_record,
 )
 from ..plots.plot_generator import (
     export_html,
@@ -90,10 +111,9 @@ def main():
     """
     try:
         # ========================================================================
-        # SESSION STATE: Path Memory
+        # PERSISTENT SETTINGS (disk-backed)
         # ========================================================================
-        if "last_data_path" not in st.session_state:
-            st.session_state.last_data_path = ""
+        _app_settings = load_settings()
 
         # ========================================================================
         # PAGE SETUP
@@ -106,17 +126,17 @@ def main():
         with st.sidebar:
             st.header("📁 Data Source")
             
-            # Show last used path as hint
-            hint_text = ""
-            if st.session_state.last_data_path:
-                hint_text = f"Last used: {st.session_state.last_data_path}"
-            
             data_folder_str = st.text_input(
                 "Path to test data folder",
-                value=st.session_state.last_data_path,
+                value=_app_settings.data_folder_path,
                 placeholder="/Users/.../All_tests",
-                help="Paste path from Terminal (spaces are OK). Will be saved for next session.",
+                help="Path is saved to disk automatically — you won't need to re-enter it.",
             )
+
+            # Persist to disk whenever the value changes
+            if data_folder_str.strip() != _app_settings.data_folder_path:
+                _app_settings.data_folder_path = data_folder_str.strip()
+                save_settings(_app_settings)
 
             st.divider()
             st.header("📊 Options")
@@ -159,6 +179,20 @@ def main():
                      "frequency-binned plots.",
                 key="show_error_bars_checkbox",
             )
+            show_average = st.checkbox(
+                "Show average on all-points plot",
+                value=False,
+                help="Overlay the per-frequency average line on the "
+                     "all-points scatter plot.",
+                key="show_average_checkbox",
+            )
+            show_avg_error_bars = st.checkbox(
+                "Show ±std on average line",
+                value=True,
+                help="Show the ±1 std shaded band around the average "
+                     "line (only visible when average is enabled).",
+                key="show_avg_error_bars_checkbox",
+            )
 
             # ── Y-AXIS RANGE ───────────────────────────────────────────
             st.divider()
@@ -197,20 +231,21 @@ def main():
                 st.markdown(
                     """
     **The app classifies every test folder as either *Constant Frequency*
-    or *Frequency Sweep* using a four-level priority system:**
+    or *Frequency Sweep* using a five-level priority system:**
 
     | Priority | Method | When it fires |
     |----------|--------|---------------|
     | 1 | **`freq_set_hz` column** | The CSV (merged.csv) contains a `freq_set_hz` column. If there is only **1** unique frequency value → *Constant*. If there are **many** → *Sweep*. This is the most reliable method. |
-    | 2 | **Metadata file** | The folder name is found in `app/test_metadata.json`, which lists the correct type for every known test. You can edit this file manually or use the *Naming Conventions* section below. |
-    | 3 | **Regex patterns** | The folder name matches one of the built-in sweep patterns (e.g. `1Hz_1500H_Hz_500_seconds`) or a user-defined pattern. |
-    | 4 | **Unknown → Constant** | Nothing matched. The app defaults to *Constant* because that is the safest fallback (shows boxplot + histogram). |
+    | 2 | **Experiment log** | The test is listed in the shared `Experiment logs_new format.xlsx` file next to the `All_tests` folder. |
+    | 3 | **Metadata file** | The folder name is found in `app/test_metadata.json`, which lists saved corrections and extra metadata. |
+    | 4 | **Regex patterns** | The folder name matches one of the built-in sweep patterns (e.g. `1Hz_1500H_Hz_500_seconds`) or a user-defined pattern. |
+    | 5 | **Unknown → Constant** | Nothing matched. The app defaults to *Constant* because that is the safest fallback (shows boxplot + histogram). |
 
     **When to use the override:**
     - A folder name looks like a sweep but was actually run at a constant
       frequency (microcontroller bug).
     - A folder name is completely new and hasn't been added to the
-      metadata file yet.
+      experiment log or metadata file yet.
     - You just want to quickly check how the data looks in the other
       visualisation mode.
 
@@ -252,7 +287,7 @@ def main():
     folders, add a regex (regular expression) pattern here.  Any folder
     whose name matches one of these patterns will be classified as a
     sweep.  Folders that match *none* of the patterns fall back to the
-    metadata file or default to constant.
+    experiment log, metadata file, or default to constant.
 
     **Built-in patterns already handle:**
     - `10Hz_500Hz_60s` — standard sweep
@@ -317,9 +352,6 @@ def main():
         # ========================================================================
         try:
             root = normalize_root(data_folder_str)
-            # Save path to session state for next time
-            if data_folder_str and data_folder_str != st.session_state.last_data_path:
-                st.session_state.last_data_path = data_folder_str
         except Exception as e:
             st.error(f"❌ Invalid path: {e}")
             st.stop()
@@ -338,8 +370,26 @@ def main():
         # SELECT RUN FOLDER AND CSV
         # ========================================================================
         run_names = [p.name for p in run_dirs]
-        selected_run_name = st.selectbox("📂 Select run folder", run_names)
-        run_dir = run_dirs[run_names.index(selected_run_name)]
+        run_map = {run_dir.name: run_dir for run_dir in run_dirs}
+
+        run_query = st.text_input(
+            "🔎 Search for a test",
+            placeholder="Pump 3, 500Hz, 20260224...",
+            help="Type a folder fragment, date, pump label, or frequency hint.",
+            key="explorer_run_query",
+        )
+        ranked_run_names = rank_test_names(run_names, run_query, limit=len(run_names))
+        if not ranked_run_names:
+            st.warning("No matching test folders.")
+            st.stop()
+
+        if run_query.strip():
+            st.caption(
+                f"Showing {len(ranked_run_names)} ranked match(es) out of {len(run_names)} tests."
+            )
+
+        selected_run_name = st.selectbox("📂 Matching run folders", ranked_run_names)
+        run_dir = run_map[selected_run_name]
 
         # Determine CSV file
         if auto_pick_csv:
@@ -439,20 +489,184 @@ def main():
         # ========================================================================
         # PROCESS DATA & DETERMINE TEST TYPE
         # ========================================================================
-        # Data-driven detection hierarchy
-        detected_type, detection_method, meta_entry = detect_test_type(selected_run_name, df)
+        # ── Load saved test config (if any) ─────────────────────────────
+        saved_cfg = get_test_config(selected_run_name)
 
-        # Manual override from sidebar
+        # Data-driven detection hierarchy
+        detected_type, detection_method, meta_entry = detect_test_type(
+            selected_run_name,
+            df,
+            data_root=root,
+        )
+
+        resolved_record = resolve_test_record(
+            selected_run_name,
+            root,
+            run_dir=run_dir,
+            df=df,
+        )
+
+        st.caption(
+            f"{format_classification_summary(resolved_record)}"
+            + (
+                f" • {resolved_record.pump_bar_id}"
+                if resolved_record.pump_bar_id
+                else ""
+            )
+        )
+
+        # ── Prominent warning for unknown tests ────────────────────────
+        if detected_type == "unknown" and saved_cfg is None:
+            st.warning(
+                "⚠️ **This test could not be auto-classified.**  "
+                "The folder name doesn't match any known pattern.  "
+                "Please define the test type below so the app knows "
+                "how to analyse it correctly."
+            )
+
+        # ── Test Configuration editor ───────────────────────────────────
+        with st.expander("⚙️ Test Configuration (define once, remembered forever)", expanded=(saved_cfg is None and detected_type == "unknown")):
+            st.markdown(
+                "Define the test type and parameters for **{}**. "
+                "This is saved to disk and will be remembered across sessions "
+                "and for all users.".format(selected_run_name)
+            )
+
+            # Pre-fill from saved config, else from auto-detection
+            cfg_type_options = ["constant", "sweep"]
+            if saved_cfg:
+                cfg_type_default = cfg_type_options.index(saved_cfg.test_type)
+            elif detected_type in cfg_type_options:
+                cfg_type_default = cfg_type_options.index(detected_type)
+            else:
+                cfg_type_default = 0
+
+            cfg_type = st.selectbox(
+                "Test type",
+                options=cfg_type_options,
+                index=cfg_type_default,
+                format_func=lambda x: "Constant Frequency" if x == "constant" else "Frequency Sweep",
+                key="cfg_type_select",
+            )
+
+            if cfg_type == "constant":
+                default_hz = DEFAULT_CONSTANT_FREQUENCY_HZ
+                if saved_cfg and saved_cfg.frequency_hz is not None:
+                    default_hz = saved_cfg.frequency_hz
+                elif resolved_record.frequency_hz is not None:
+                    default_hz = resolved_record.frequency_hz
+                elif meta_entry and meta_entry.get("frequency_hz"):
+                    default_hz = float(meta_entry["frequency_hz"])
+
+                cfg_freq = st.number_input(
+                    "Frequency (Hz)",
+                    value=float(default_hz),
+                    min_value=0.1,
+                    step=10.0,
+                    key="cfg_freq_input",
+                )
+                cfg_start = cfg_end = cfg_dur = None
+            else:
+                # Sweep defaults: saved_cfg → parsed spec → fallback
+                parsed_spec = parse_sweep_spec_from_name(selected_run_name)
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    cfg_start = st.number_input(
+                        "Start frequency (Hz)",
+                        value=float(
+                            saved_cfg.start_hz if saved_cfg and saved_cfg.start_hz is not None
+                            else (
+                                resolved_record.sweep_start_hz
+                                if resolved_record.sweep_start_hz is not None
+                                else (parsed_spec.start_hz if parsed_spec else 1.0)
+                            )
+                        ),
+                        min_value=0.0,
+                        step=1.0,
+                        key="cfg_start_input",
+                    )
+                with c2:
+                    cfg_end = st.number_input(
+                        "End frequency (Hz)",
+                        value=float(
+                            saved_cfg.end_hz if saved_cfg and saved_cfg.end_hz is not None
+                            else (
+                                resolved_record.sweep_end_hz
+                                if resolved_record.sweep_end_hz is not None
+                                else (parsed_spec.end_hz if parsed_spec else 1000.0)
+                            )
+                        ),
+                        min_value=0.0,
+                        step=10.0,
+                        key="cfg_end_input",
+                    )
+                with c3:
+                    cfg_dur = st.number_input(
+                        "Sweep duration (s)",
+                        value=float(
+                            saved_cfg.duration_s if saved_cfg and saved_cfg.duration_s is not None
+                            else (
+                                resolved_record.duration_s
+                                if resolved_record.duration_s is not None
+                                else (parsed_spec.duration_s if parsed_spec else 0.0)
+                            )
+                        ),
+                        min_value=0.0,
+                        step=1.0,
+                        help="Duration of one sweep cycle. Set to 0 if unknown (will estimate from data).",
+                        key="cfg_dur_input",
+                    )
+                cfg_freq = None
+
+            cfg_note = st.text_input(
+                "Note (optional)",
+                value=saved_cfg.note if saved_cfg else "",
+                key="cfg_note_input",
+            )
+
+            btn_col1, btn_col2 = st.columns([1, 1])
+            with btn_col1:
+                if st.button("💾 Save configuration", key="save_cfg_btn"):
+                    new_cfg = TestConfig(
+                        test_type=cfg_type,
+                        frequency_hz=cfg_freq,
+                        start_hz=cfg_start,
+                        end_hz=cfg_end,
+                        duration_s=cfg_dur,
+                        note=cfg_note,
+                    )
+                    save_test_config(selected_run_name, new_cfg)
+                    st.success(f"✅ Configuration saved for **{selected_run_name}**")
+                    st.rerun()
+            with btn_col2:
+                if saved_cfg and st.button("🗑️ Delete configuration", key="del_cfg_btn"):
+                    delete_test_config(selected_run_name)
+                    st.success(f"Deleted configuration for **{selected_run_name}**")
+                    st.rerun()
+
+            if saved_cfg:
+                st.caption(f"💾 Saved config: **{saved_cfg.test_type}**" + (
+                    f" @ {saved_cfg.frequency_hz:g} Hz" if saved_cfg.test_type == "constant" and saved_cfg.frequency_hz else
+                    f" {saved_cfg.start_hz:g}→{saved_cfg.end_hz:g} Hz, {saved_cfg.duration_s:g}s" if saved_cfg.test_type == "sweep" and saved_cfg.start_hz is not None else ""
+                ))
+
+        # ── Resolve final test type ────────────────────────────────────
+        # Priority: manual sidebar override > saved config > auto-detection
         if manual_test_type == "Constant Frequency":
             is_constant_freq_test = True
             detection_badge = "🟡 **Manual override → Constant**"
         elif manual_test_type == "Frequency Sweep":
             is_constant_freq_test = False
             detection_badge = "🟡 **Manual override → Sweep**"
+        elif saved_cfg:
+            is_constant_freq_test = saved_cfg.test_type == "constant"
+            detection_badge = f"💾 **Saved config → {saved_cfg.test_type.title()}**"
         else:
             is_constant_freq_test = detected_type != "sweep"
             method_label = {
+                "saved_config":      "💾 saved configuration",
                 "freq_set_hz_column": "📊 `freq_set_hz` column",
+                "experiment_log":    "📝 experiment log",
                 "metadata":          "📋 metadata file",
                 "regex":             "🔤 folder-name regex",
                 "user_regex":        "🏷️ user regex pattern",
@@ -471,29 +685,52 @@ def main():
                 for k, v in meta_entry.items():
                     st.write(f"**{k}:** {v}")
 
+        if (
+            resolved_record.pump_bar_id
+            or resolved_record.date
+            or resolved_record.author
+            or resolved_record.voltage
+            or resolved_record.note
+        ):
+            with st.expander("📝 Resolved Test Details", expanded=False):
+                st.write(f"**Classification:** {format_classification_summary(resolved_record)}")
+                st.write(f"**Detected via:** {format_detection_method(resolved_record.detection_method)}")
+                if resolved_record.pump_bar_id:
+                    st.write(f"**Pump / BAR:** {resolved_record.pump_bar_id}")
+                if resolved_record.date:
+                    st.write(f"**Date:** {resolved_record.date}")
+                if resolved_record.time:
+                    st.write(f"**Time:** {resolved_record.time}")
+                if resolved_record.author:
+                    st.write(f"**Author:** {resolved_record.author}")
+                if resolved_record.voltage:
+                    st.write(f"**Voltage:** {resolved_record.voltage}")
+                if resolved_record.success:
+                    st.write(f"**Result:** {resolved_record.success}")
+                if resolved_record.duration_s:
+                    st.write(f"**Duration:** {resolved_record.duration_s:g} s")
+                if resolved_record.note:
+                    st.write(f"**Notes:** {resolved_record.note}")
+
         if is_constant_freq_test:
             # ====================================================================
             # CONSTANT FREQUENCY TEST
             # ====================================================================
             st.subheader("📊 Constant Frequency Test Analysis")
 
-            # Determine default frequency: metadata → config fallback
+            # Determine default frequency from saved config / metadata
             default_freq = DEFAULT_CONSTANT_FREQUENCY_HZ
-            if meta_entry and meta_entry.get("frequency_hz"):
+            if saved_cfg and saved_cfg.test_type == "constant" and saved_cfg.frequency_hz is not None:
+                default_freq = saved_cfg.frequency_hz
+            elif resolved_record.frequency_hz is not None:
+                default_freq = resolved_record.frequency_hz
+            elif meta_entry and meta_entry.get("frequency_hz"):
                 default_freq = float(meta_entry["frequency_hz"])
+            manual_freq = default_freq  # used internally by prepare_constant_frequency_data
 
-            # Options row: frequency + histogram bins
-            opt1, opt2 = st.columns(2)
+            # Options row
+            opt1, opt2, opt3 = st.columns(3)
             with opt1:
-                manual_freq = st.number_input(
-                    "📈 Frequency (Hz)",
-                    value=float(default_freq),
-                    min_value=0.1,
-                    step=10.0,
-                    help="Override auto-detected frequency",
-                    key="const_freq_input",
-                )
-            with opt2:
                 hist_bins = st.number_input(
                     "📊 Histogram bins",
                     value=30,
@@ -501,6 +738,26 @@ def main():
                     max_value=200,
                     step=5,
                     key="hist_bins_input",
+                )
+            with opt2:
+                show_const_avg = st.checkbox(
+                    "Show time-binned average",
+                    value=False,
+                    help="Overlay a running average computed over "
+                         "time bins of the width you set.",
+                    key="const_avg_toggle",
+                )
+            with opt3:
+                avg_bin_s = st.number_input(
+                    "Average bin width (s)",
+                    value=5.0,
+                    min_value=0.5,
+                    max_value=120.0,
+                    step=0.5,
+                    help="Width of each time bin in seconds for the "
+                         "rolling average overlay.",
+                    key="const_avg_bin_s",
+                    disabled=not show_const_avg,
                 )
 
             # Prepare data
@@ -510,7 +767,7 @@ def main():
                     time_col=time_col,
                     signal_col=signal_col,
                     frequency_hz=float(manual_freq),
-                    parse_time=False,
+                    parse_time=(time_format == "absolute_timestamp"),
                     drop_na=drop_na_toggle,
                 )
             except Exception as e:
@@ -529,6 +786,67 @@ def main():
                     opacity=marker_opacity,
                     y_range=y_range,
                 )
+
+                # ── Time-binned average overlay ──────────────────────
+                if show_const_avg:
+                    import numpy as _np
+                    _avg_df = const_freq_df[[time_col, signal_col]].dropna().copy()
+
+                    if time_format == "absolute_timestamp":
+                        _t0 = _avg_df[time_col].iloc[0]
+                        _elapsed = (_avg_df[time_col] - _t0).dt.total_seconds()
+                    else:
+                        _elapsed = _avg_df[time_col].astype(float)
+
+                    _avg_df["_bin"] = (_elapsed // avg_bin_s).astype(int)
+                    _binned_avg = (
+                        _avg_df.groupby("_bin")
+                        .agg(
+                            mean=(signal_col, "mean"),
+                            std=(signal_col, "std"),
+                            t_mid=(time_col, "median"),
+                        )
+                        .reset_index()
+                    )
+                    _binned_avg["std"] = _binned_avg["std"].fillna(0)
+
+                    # ±1 std band
+                    fig_ts.add_trace(
+                        go.Scatter(
+                            x=_binned_avg["t_mid"],
+                            y=_binned_avg["mean"] + _binned_avg["std"],
+                            mode="lines",
+                            line=dict(width=0),
+                            showlegend=False,
+                            hoverinfo="skip",
+                            legendgroup="avg",
+                        )
+                    )
+                    fig_ts.add_trace(
+                        go.Scatter(
+                            x=_binned_avg["t_mid"],
+                            y=_binned_avg["mean"] - _binned_avg["std"],
+                            mode="lines",
+                            line=dict(width=0),
+                            fill="tonexty",
+                            name=f"Avg ±1 std ({avg_bin_s:g}s bins)",
+                            fillcolor="rgba(255, 100, 0, 0.18)",
+                            hoverinfo="skip",
+                            legendgroup="avg",
+                        )
+                    )
+                    # Mean line
+                    fig_ts.add_trace(
+                        go.Scattergl(
+                            x=_binned_avg["t_mid"],
+                            y=_binned_avg["mean"],
+                            mode="lines",
+                            name=f"Average ({avg_bin_s:g}s bins)",
+                            line=dict(color="orangered", width=2.5),
+                            legendgroup="avg",
+                        )
+                    )
+
                 st.plotly_chart(fig_ts, use_container_width=True)
 
                 if export_html_toggle:
@@ -548,7 +866,7 @@ def main():
                     fig_box = plot_constant_frequency_boxplot(
                         const_freq_df,
                         y_col=signal_col,
-                        title=f"Flow @ {manual_freq:g} Hz",
+                        title=f"Flow @ {default_freq:g} Hz",
                     )
                     st.plotly_chart(fig_box, use_container_width=True)
 
@@ -594,12 +912,20 @@ def main():
             # ====================================================================
             st.subheader("📈 Frequency Sweep Test Analysis")
             
-            # Parse sweep specification from folder name
-            sweep_spec = parse_sweep_spec_from_name(selected_run_name)
-            if sweep_spec:
-                st.caption(f"🔄 Sweep: {sweep_spec}")
+            # Build sweep spec: saved config → folder-name regex → None
+            if saved_cfg and saved_cfg.test_type == "sweep" and saved_cfg.start_hz is not None:
+                sweep_spec = SweepSpec(
+                    start_hz=saved_cfg.start_hz,
+                    end_hz=saved_cfg.end_hz or 1000.0,
+                    duration_s=saved_cfg.duration_s or 0.0,
+                )
+                st.caption(f"💾 Sweep (saved config): {sweep_spec}")
             else:
-                st.warning("⚠️ Could not parse sweep parameters from folder name. Frequency mapping will use the `freq_set_hz` column if available, or elapsed time as a proxy.")
+                sweep_spec = parse_sweep_spec_from_name(selected_run_name)
+                if sweep_spec:
+                    st.caption(f"🔄 Sweep (parsed from name): {sweep_spec}")
+                else:
+                    st.warning("⚠️ Could not determine sweep parameters. Open the **Test Configuration** section above to define them, or the app will use the `freq_set_hz` column if available.")
 
             # Binning & display options
             col1, col2 = st.columns(2)
@@ -685,7 +1011,55 @@ def main():
 
             # FREQUENCY ANALYSIS TAB
             with tab_freq:
-                # All points plot (capped to max_points for browser performance)
+                # ── Sweep visibility controls ────────────────────────────
+                all_sweep_ids = sorted(sweep_df["Sweep"].unique()) if "Sweep" in sweep_df.columns else []
+                all_sweep_labels = [f"Sweep {int(s) + 1}" for s in all_sweep_ids]
+
+                if len(all_sweep_ids) > 1:
+                    # Callbacks must run BEFORE the widget is instantiated
+                    def _hide_all():
+                        st.session_state["visible_sweeps_multiselect"] = []
+
+                    def _show_all():
+                        st.session_state["visible_sweeps_multiselect"] = all_sweep_labels
+
+                    vis_col1, vis_col2, vis_col3 = st.columns([3, 1, 1])
+                    with vis_col2:
+                        st.button("🔲 Hide all", key="hide_all_sweeps", on_click=_hide_all)
+                    with vis_col3:
+                        st.button("✅ Show all", key="show_all_sweeps", on_click=_show_all)
+                    with vis_col1:
+                        selected_labels = st.multiselect(
+                            "Visible sweeps",
+                            options=all_sweep_labels,
+                            default=all_sweep_labels,
+                            key="visible_sweeps_multiselect",
+                            help="Select which sweeps to display. "
+                                 "You can also click legend items in the plot to toggle.",
+                        )
+
+                    # Convert selected labels back to 0-based indices
+                    visible_sweep_set: set[int] | None = {
+                        all_sweep_ids[all_sweep_labels.index(lbl)]
+                        for lbl in selected_labels
+                        if lbl in all_sweep_labels
+                    }
+                else:
+                    visible_sweep_set = None  # single sweep → always visible
+
+                # ── Compute average overlay (full dataset, not capped) ───
+                avg_df = None
+                if show_average:
+                    try:
+                        avg_df = compute_frequency_average(
+                            sweep_df,
+                            value_col=signal_col,
+                            freq_col="Frequency",
+                        )
+                    except Exception:
+                        avg_df = None
+
+                # ── All points plot (capped for browser performance) ─────
                 pts_df = sweep_df.head(int(max_points))
 
                 try:
@@ -699,6 +1073,9 @@ def main():
                         marker_size=marker_size,
                         opacity=marker_opacity,
                         y_range=y_range,
+                        visible_sweeps=visible_sweep_set,
+                        average_df=avg_df,
+                        show_average_error_bars=show_avg_error_bars,
                     )
                     st.plotly_chart(fig_pts, use_container_width=True)
 
@@ -711,7 +1088,7 @@ def main():
                 except Exception as e:
                     st.error(f"❌ All points plot failed: {e}")
 
-                # Binned plot
+                # ── Binned plot ──────────────────────────────────────────
                 try:
                     binned = bin_by_frequency(
                         sweep_df,
@@ -724,13 +1101,17 @@ def main():
                     binned = None
 
                 if binned is not None:
+                    n_bins = len(binned)
                     try:
                         fig_bin = plot_sweep_binned(
                             binned,
                             x_col="freq_center",
                             y_col="mean",
                             std_col="std",
-                            title=f"{selected_run_name} — Binned Mean ± Std (Δf = {bin_hz:g} Hz)",
+                            title=(
+                                f"{selected_run_name} — Binned Mean ± Std"
+                                f"  ({n_bins} bins, {bin_hz:g} Hz each)"
+                            ),
                             mode=plot_mode,
                             marker_size=marker_size,
                             show_error_bars=show_error_bars,
@@ -748,6 +1129,12 @@ def main():
                         st.error(f"❌ Binned plot failed: {e}")
 
                     with st.expander("📋 Binned Data Table", expanded=False):
+                        st.caption(
+                            f"Each row is one frequency bin of width "
+                            f"**{bin_hz:g} Hz**. Change the *Frequency bin "
+                            f"width* slider above to make bins wider (smoother) "
+                            f"or narrower (more detail)."
+                        )
                         st.dataframe(binned, use_container_width=True)
 
                 # ── Per-sweep average summary table ──────────────────────

@@ -177,6 +177,9 @@ def plot_sweep_all_points(
     marker_size: int = 4,
     opacity: float = 0.7,
     y_range: tuple[float, float] | None = None,
+    visible_sweeps: set[int] | None = None,
+    average_df: pd.DataFrame | None = None,
+    show_average_error_bars: bool = True,
 ) -> go.Figure:
     """Scatter / line plot of all sweep data points.
 
@@ -193,12 +196,24 @@ def plot_sweep_all_points(
         Marker opacity 0-1.
     y_range : tuple or None
         Fixed ``(ymin, ymax)`` for the y-axis.  ``None`` = auto-range.
+    visible_sweeps : set[int] or None
+        Set of sweep indices (0-based) to display.  ``None`` = show all.
+    average_df : pd.DataFrame or None
+        If provided, overlay a per-frequency average line.  Expected
+        columns: ``freq``, ``mean``, ``std``.
+    show_average_error_bars : bool
+        When *True* and *average_df* is provided, draw ±1 std band
+        around the average line.
     """
     fig = go.Figure()
 
     if color_col and color_col in df.columns:
         sweep_ids = sorted(df[color_col].unique())
         for i, sw in enumerate(sweep_ids):
+            # If visible_sweeps is set, hide sweeps not in the set
+            is_visible = (
+                True if visible_sweeps is None else (int(sw) in visible_sweeps)
+            )
             sub = df[df[color_col] == sw]
             colour = _SWEEP_PALETTE[i % len(_SWEEP_PALETTE)]
             fig.add_trace(
@@ -209,6 +224,8 @@ def plot_sweep_all_points(
                     name=f"Sweep {int(sw) + 1}",
                     marker=dict(size=marker_size, opacity=opacity, color=colour),
                     line=dict(width=1.5, color=colour),
+                    visible=True if is_visible else "legendonly",
+                    legendgroup=f"sweep_{int(sw)}",
                 )
             )
     else:
@@ -220,6 +237,49 @@ def plot_sweep_all_points(
                 name=y_col,
                 marker=dict(size=marker_size, opacity=opacity),
                 line=dict(width=1.5),
+            )
+        )
+
+    # ── Average overlay ─────────────────────────────────────────────
+    if average_df is not None and not average_df.empty:
+        # ±1 std shaded band (behind the mean line)
+        if show_average_error_bars and "std" in average_df.columns:
+            y_upper = average_df["mean"] + average_df["std"].fillna(0)
+            y_lower = average_df["mean"] - average_df["std"].fillna(0)
+            fig.add_trace(
+                go.Scatter(
+                    x=average_df["freq"],
+                    y=y_upper,
+                    mode="lines",
+                    line=dict(width=0),
+                    showlegend=False,
+                    hoverinfo="skip",
+                    legendgroup="avg",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=average_df["freq"],
+                    y=y_lower,
+                    mode="lines",
+                    line=dict(width=0),
+                    fill="tonexty",
+                    name="Avg ±1 std",
+                    fillcolor="rgba(0, 0, 0, 0.15)",
+                    hoverinfo="skip",
+                    legendgroup="avg",
+                )
+            )
+
+        # Mean line (on top of the band)
+        fig.add_trace(
+            go.Scattergl(
+                x=average_df["freq"],
+                y=average_df["mean"],
+                mode="lines",
+                name="Average",
+                line=dict(color="black", width=2.5, dash="solid"),
+                legendgroup="avg",
             )
         )
 

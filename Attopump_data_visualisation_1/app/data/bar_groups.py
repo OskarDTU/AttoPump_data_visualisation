@@ -1,10 +1,10 @@
-"""Persistence layer for Bar definitions and Shipment groups.
+"""Persistence layer for Pump definitions and Shipment groups.
 
-A **bar** is a named collection of test folders that belong to the same
-physical pump (e.g. "Bar 1" → ["test_folder_A", "test_folder_B"]).
+A **pump** is a named collection of test folders that belong to the same
+physical pump (e.g. "Pump 1" → ["test_folder_A", "test_folder_B"]).
 
-A **shipment** groups multiple bars together under a recipient label
-(e.g. "Niels' bars" → ["Bar 1", "Bar 2"]).
+A **shipment** groups multiple pumps together under a recipient label
+(e.g. "Niels' pumps" → ["Pump 1", "Pump 2"]).
 
 Data is stored in ``bar_groups.json`` next to ``test_metadata.json``.
 """
@@ -23,7 +23,7 @@ _BAR_GROUPS_PATH = Path(__file__).parent / "bar_groups.json"
 
 @dataclass
 class Bar:
-    """A named pump bar with its associated test folders."""
+    """A named pump with its associated test folders."""
     name: str
     tests: list[str] = field(default_factory=list)
     description: str = ""
@@ -31,7 +31,7 @@ class Bar:
 
 @dataclass
 class Shipment:
-    """A shipment groups bars under a recipient name."""
+    """A shipment groups pumps under a recipient name."""
     name: str
     bars: list[str] = field(default_factory=list)
     recipient: str = ""
@@ -42,7 +42,7 @@ class Shipment:
 class TestGroup:
     """A named collection of test folders for quick re-comparison.
 
-    Unlike a bar (which represents a physical pump), a test group is an
+    Unlike a pump (which represents a physical pump), a test group is an
     arbitrary set of test folders saved for convenience.
     """
     name: str
@@ -52,7 +52,7 @@ class TestGroup:
 
 @dataclass
 class BarGroupsStore:
-    """Top-level container for all bars, shipments, and test groups."""
+    """Top-level container for all pumps, shipments, and test groups."""
     bars: dict[str, Bar] = field(default_factory=dict)
     shipments: dict[str, Shipment] = field(default_factory=dict)
     test_groups: dict[str, TestGroup] = field(default_factory=dict)
@@ -63,8 +63,8 @@ class BarGroupsStore:
 def _store_to_dict(store: BarGroupsStore) -> dict[str, Any]:
     return {
         "_description": (
-            "Bar groups, shipments, and test groups for AttoPump comparisons. "
-            "Managed by the Comprehensive Analysis page."
+            "Pump groups, shipments, and test groups for AttoPump comparisons. "
+            "Managed by the Manage Groups page."
         ),
         "bars": {name: asdict(bar) for name, bar in store.bars.items()},
         "shipments": {name: asdict(s) for name, s in store.shipments.items()},

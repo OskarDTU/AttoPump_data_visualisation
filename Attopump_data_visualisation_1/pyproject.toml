@@ -16,6 +16,7 @@ dependencies = [
     "click >=8.0.1",
     "nox",
     "numpy",
+    "openpyxl>=3.1",
     "pandas>=2.3.3",
     "plotly>=6.5.2",
     "scipy>=1.11",

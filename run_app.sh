@@ -10,4 +10,12 @@
 # The app will open in the default browser at http://localhost:8501.
 # ────────────────────────────────────────────────────────────────────
 cd "$(dirname "$0")"
-./Attopump_data_visualisation_1/.venv/bin/streamlit run streamlit_app.py
+
+if [ -x "./.venv/bin/streamlit" ]; then
+  ./.venv/bin/streamlit run streamlit_app.py
+elif [ -x "./Attopump_data_visualisation_1/.venv/bin/streamlit" ]; then
+  ./Attopump_data_visualisation_1/.venv/bin/streamlit run streamlit_app.py
+else
+  echo "No Streamlit executable found in ./.venv or ./Attopump_data_visualisation_1/.venv" >&2
+  exit 1
+fi
