@@ -89,6 +89,8 @@ class ReportDefinition:
         Whether to include ±1 std bands on plots.
     show_individual_tests : bool
         Whether to show per-test lines behind bar averages.
+    show_raw_all_sweeps : bool
+        Whether to include the raw all-sweeps layer for individual sweep tests.
     selection_mode : str
         ``"pumps"`` or ``"sub_groups"``.
     """
@@ -103,6 +105,7 @@ class ReportDefinition:
     bin_hz: float = 5.0
     show_error_bars: bool = True
     show_individual_tests: bool = False
+    show_raw_all_sweeps: bool = True
     selection_mode: str = "pumps"
 
 
@@ -110,7 +113,7 @@ class ReportDefinition:
 COMPARISON_OPTIONS: dict[str, str] = {
     "sweep_overlay": "📈 Sweep overlay (mean ± std per entry)",
     "sweep_relative": "📉 Relative sweep (0–100 %)",
-    "individual_sweeps": "📊 Individual test sweeps",
+    "individual_sweeps": "📊 Individual sweep diagnostics",
     "global_average": "📏 Global average curve",
     "boxplots": "📦 Flow distribution boxplots",
     "histograms": "📊 Flow histograms",
@@ -156,6 +159,7 @@ def save_report_definition(name: str, defn: ReportDefinition) -> None:
         "bin_hz": defn.bin_hz,
         "show_error_bars": defn.show_error_bars,
         "show_individual_tests": defn.show_individual_tests,
+        "show_raw_all_sweeps": defn.show_raw_all_sweeps,
         "selection_mode": defn.selection_mode,
         "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
@@ -189,6 +193,7 @@ def load_report_definition(name: str) -> ReportDefinition | None:
         bin_hz=d.get("bin_hz", 5.0),
         show_error_bars=d.get("show_error_bars", True),
         show_individual_tests=d.get("show_individual_tests", False),
+        show_raw_all_sweeps=d.get("show_raw_all_sweeps", True),
         selection_mode=d.get("selection_mode", "pumps"),
     )
 

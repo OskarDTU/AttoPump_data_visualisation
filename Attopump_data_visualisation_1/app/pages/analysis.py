@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 import traceback
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import datetime
 from pathlib import Path
 
@@ -100,6 +100,37 @@ def _get_registry() -> PumpRegistry:
 def _persist() -> None:
     """Flush the pump registry to ``pump_registry.json``."""
     save_registry(_get_registry())
+
+
+def _build_saved_test_group_options(
+    reg: PumpRegistry,
+) -> tuple[
+    OrderedDict[str, dict[str, str | list[str]]],
+    OrderedDict[str, OrderedDict[str, dict[str, str | list[str]]]],
+]:
+    """Collect saved top-level test groups and pump sub-groups for selection UI."""
+    saved_test_groups: OrderedDict[str, dict[str, str | list[str]]] = OrderedDict()
+    pump_sub_groups: OrderedDict[
+        str, OrderedDict[str, dict[str, str | list[str]]]
+    ] = OrderedDict()
+
+    for group_name, group in sorted(reg.test_groups.items()):
+        saved_test_groups[group_name] = {
+            "tests": list(group.tests),
+            "description": group.description,
+        }
+
+    for pump_name, pump in sorted(reg.pumps.items()):
+        if not pump.sub_groups:
+            continue
+        pump_sub_groups[pump_name] = OrderedDict()
+        for group_name, group in sorted(pump.sub_groups.items()):
+            pump_sub_groups[pump_name][group_name] = {
+                "tests": list(group.tests),
+                "description": group.description,
+            }
+
+    return saved_test_groups, pump_sub_groups
 
 
 TEST_ANALYSIS_PLOTS = [
@@ -585,39 +616,77 @@ def _render_compare_tests(
     selection_label = "custom_test_selection"
 
     if sel == "Load a saved test group":
-        saved_groups: dict[str, dict[str, str | list[str]]] = {}
-        for group_name, group in reg.test_groups.items():
-            saved_groups[f"Test group / {group_name}"] = {
-                "tests": list(group.tests),
-                "description": group.description,
-            }
-        for pump_name, pump in reg.pumps.items():
-            for group_name, group in pump.sub_groups.items():
-                saved_groups[f"Pump sub-group / {pump_name} / {group_name}"] = {
-                    "tests": list(group.tests),
-                    "description": group.description,
-                }
+        saved_test_groups, pump_sub_groups = _build_saved_test_group_options(reg)
 
-        if not saved_groups:
+        if not saved_test_groups and not pump_sub_groups:
             st.info(
                 "No saved test groups or pump sub-groups exist yet. "
                 "Create them on **Manage Groups** or pick tests manually."
             )
             return
 
-        chosen = st.selectbox(
-            "📋 Saved test group or pump sub-group",
-            list(saved_groups.keys()),
-            key="ct_grp",
-        )
-        group_tests = saved_groups[chosen]["tests"]
+        saved_sources: list[str] = []
+        if saved_test_groups:
+            saved_sources.append("Test groups")
+        if pump_sub_groups:
+            saved_sources.append("Pump sub-groups")
+        if saved_test_groups and pump_sub_groups:
+            saved_sources.append("All saved selections")
+
+        chosen_payload: dict[str, str | list[str]]
+        chosen_label: str
+
+        if len(saved_sources) == 1:
+            saved_source = saved_sources[0]
+            st.caption(f"Saved selection source: **{saved_source}**")
+        else:
+            saved_source = st.radio(
+                "Saved selection source",
+                saved_sources,
+                horizontal=True,
+                key="ct_saved_source",
+            )
+
+        if saved_source == "Pump sub-groups":
+            pump_choice = st.selectbox(
+                "🔧 Pump",
+                list(pump_sub_groups.keys()),
+                key="ct_saved_pump",
+            )
+            group_choice = st.selectbox(
+                "📋 Pump sub-group",
+                list(pump_sub_groups[pump_choice].keys()),
+                key="ct_saved_subgroup",
+            )
+            chosen_label = f"Pump sub-group / {pump_choice} / {group_choice}"
+            chosen_payload = pump_sub_groups[pump_choice][group_choice]
+        else:
+            combined_groups: OrderedDict[str, dict[str, str | list[str]]] = OrderedDict()
+            if saved_source in {"Test groups", "All saved selections"}:
+                for group_name, payload in saved_test_groups.items():
+                    combined_groups[f"Test group / {group_name}"] = payload
+            if saved_source == "All saved selections":
+                for pump_name, groups in pump_sub_groups.items():
+                    for group_name, payload in groups.items():
+                        combined_groups[
+                            f"Pump sub-group / {pump_name} / {group_name}"
+                        ] = payload
+
+            chosen_label = st.selectbox(
+                "📋 Saved test group or pump sub-group",
+                list(combined_groups.keys()),
+                key="ct_grp",
+            )
+            chosen_payload = combined_groups[chosen_label]
+
+        group_tests = chosen_payload["tests"]
         selected_names = [t for t in group_tests if t in run_names]
-        selection_label = _slugify(f"saved_group_{chosen}")
+        selection_label = _slugify(f"saved_group_{chosen_label}")
         st.caption(
             f"Selection contains {len(group_tests)} test(s), "
             f"{len(selected_names)} available in current data folder."
         )
-        group_description = str(saved_groups[chosen]["description"]).strip()
+        group_description = str(chosen_payload["description"]).strip()
         if group_description:
             st.caption(group_description)
     else:
