@@ -48,47 +48,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from ..data.config import PLOT_HEIGHT
-
-# ---------------------------------------------------------------------------
-# Color palette (enough for many tests)
-# ---------------------------------------------------------------------------
-PALETTE = (
-    px.colors.qualitative.Plotly
-    + px.colors.qualitative.Set2
-    + px.colors.qualitative.Dark24
-)
-
-
-def _color_to_rgba(color: str, alpha: float = 0.2) -> str:
-    """Convert any Plotly color string to ``rgba(R, G, B, alpha)``.
-
-    Handles ``#RRGGBB``, ``rgb(R, G, B)``, and bare color names.
-    """
-    import re as _re
-
-    # rgb(R, G, B) or rgba(R, G, B, A)
-    m = _re.match(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", color)
-    if m:
-        return f"rgba({m.group(1)}, {m.group(2)}, {m.group(3)}, {alpha})"
-
-    # #RRGGBB
-    hex_color = color.lstrip("#")
-    if len(hex_color) == 6:
-        try:
-            r = int(hex_color[:2], 16)
-            g = int(hex_color[2:4], 16)
-            b = int(hex_color[4:6], 16)
-            return f"rgba({r}, {g}, {b}, {alpha})"
-        except ValueError:
-            pass
-
-    # Fallback: semi-transparent grey
-    return f"rgba(128, 128, 128, {alpha})"
-
-
-def _flow_label(col: str) -> str:
-    """Return a human-readable axis label for a flow column."""
-    return f"{col} (µL/min)" if "flow" in col.lower() else col
+from .shared import PALETTE, color_to_rgba, flow_label
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -127,7 +87,7 @@ def plot_combined_overlay(
         if show_error_bars and "std" in binned.columns:
             upper = binned["mean"] + binned["std"].fillna(0)
             lower = binned["mean"] - binned["std"].fillna(0)
-            fill_color = _color_to_rgba(color, 0.15)
+            fill_color = color_to_rgba(color, 0.15)
 
             fig.add_trace(
                 go.Scatter(
@@ -318,7 +278,7 @@ def plot_all_raw_points(
         title=title,
         height=height,
         xaxis_title="Frequency (Hz)",
-        yaxis_title=_flow_label(signal_col),
+        yaxis_title=flow_label(signal_col),
         hovermode="closest",
         dragmode="zoom",
         font=dict(size=12),
@@ -405,7 +365,7 @@ def plot_combined_boxplots(
     fig.update_layout(
         title=title,
         height=height,
-        yaxis_title=_flow_label(signal_col),
+        yaxis_title=flow_label(signal_col),
         dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
@@ -447,7 +407,7 @@ def plot_combined_histograms(
         title=title,
         height=height,
         barmode="overlay",
-        xaxis_title=_flow_label(signal_col),
+        xaxis_title=flow_label(signal_col),
         yaxis_title="Count",
         dragmode="zoom",
         font=dict(size=12),
@@ -853,7 +813,7 @@ def plot_per_test_sweeps(
         title=title,
         height=height,
         xaxis_title="Frequency (Hz)",
-        yaxis_title=_flow_label(signal_col),
+        yaxis_title=flow_label(signal_col),
         hovermode="x unified",
         dragmode="zoom",
         font=dict(size=12),

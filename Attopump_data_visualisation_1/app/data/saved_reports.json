@@ -1,0 +1,24 @@
+{
+  "_description": "Saved report definitions.",
+  "reports": {
+    "Japan pump 2 characterisation": {
+      "title": "Japan pump 2 characterisation",
+      "author": "OS",
+      "entry_ids": [
+        "__pump_sub_group__::PUMP+270226-3::Japan+set+2"
+      ],
+      "comparisons": [
+        "sweep_overlay",
+        "summary_table",
+        "boxplots",
+        "constant_time_series"
+      ],
+      "notes": "Characterisation of pump 2 for Japan. Final data.",
+      "bin_hz": 5.0,
+      "show_error_bars": true,
+      "show_individual_tests": false,
+      "selection_mode": "sub_groups",
+      "saved_at": "2026-03-10T16:59:05+00:00"
+    }
+  }
+}

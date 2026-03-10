@@ -1,0 +1,93 @@
+[
+  {
+    "timestamp": "2026-03-10T12:37:22+00:00",
+    "action": "legacy_migration",
+    "target": "(all)",
+    "details": {
+      "pumps": 13,
+      "shipments": 0,
+      "test_groups": 0,
+      "sources": [
+        "bar_groups.json"
+      ]
+    },
+    "author": "system"
+  },
+  {
+    "timestamp": "2026-03-10T15:02:20+00:00",
+    "action": "add_sub_group",
+    "target": "PUMP 270226-2",
+    "details": {
+      "group": "Verifying performance for Japan",
+      "previous_name": "Verifying performance for Japan",
+      "tests": [
+        "20260310-1316-500Hz-Pump-20260227-2",
+        "20260310-1224-1Hz_1500H_Hz_500_seconds",
+        "20260310-1242-1Hz_1500H_Hz_1_seconds",
+        "20260310-1249-1Hz_1500H_Hz_500_seconds"
+      ],
+      "description": "These four tests were different frequency sweeps done to characterise the performance for Japan."
+    },
+    "author": "user"
+  },
+  {
+    "timestamp": "2026-03-10T15:08:12+00:00",
+    "action": "unlink_test",
+    "target": "PUMP 270226-2",
+    "details": {
+      "folder": "20260306-1224-1Hz_1500H_Hz_500_seconds"
+    },
+    "author": "user"
+  },
+  {
+    "timestamp": "2026-03-10T15:08:21+00:00",
+    "action": "unlink_test",
+    "target": "PUMP 270226-2",
+    "details": {
+      "folder": "20260306-1242-1Hz_1500H_Hz_1_seconds"
+    },
+    "author": "user"
+  },
+  {
+    "timestamp": "2026-03-10T15:08:24+00:00",
+    "action": "unlink_test",
+    "target": "PUMP 270226-2",
+    "details": {
+      "folder": "20260306-1249-1Hz_1500H_Hz_500_seconds"
+    },
+    "author": "user"
+  },
+  {
+    "timestamp": "2026-03-10T16:22:39+00:00",
+    "action": "add_sub_group",
+    "target": "PUMP 270226-3",
+    "details": {
+      "group": "Japan set 1 - failed",
+      "previous_name": "Japan set 1 - failed",
+      "tests": [
+        "20260310-1335-1Hz_1500H_Hz_500_seconds",
+        "20260310-1457-1Hz_1500H_Hz_1_seconds",
+        "20260310-1504-1Hz_1500H_Hz_500_seconds"
+      ],
+      "description": "Japan set 1 - failed"
+    },
+    "author": "user"
+  },
+  {
+    "timestamp": "2026-03-10T16:23:38+00:00",
+    "action": "add_sub_group",
+    "target": "PUMP 270226-3",
+    "details": {
+      "group": "Japan set 2",
+      "previous_name": "Japan set 2",
+      "tests": [
+        "20260310-1649-500Hz-Pump-20260227-3",
+        "20260310-1617-500Hz-Pump-20260227-3",
+        "20260310-1544-1Hz_1500H_Hz_500_seconds",
+        "20260310-1542-1Hz_1500H_Hz_1_seconds"
+      ],
+      "description": "Japan set 1 - failed"
+    },
+    "author": "user"
+  }
+]

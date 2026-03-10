@@ -34,20 +34,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from ..data.config import PLOT_HEIGHT
-
-
-# ============================================================================
-# HELPERS
-# ============================================================================
-
-def _flow_label(col: str) -> str:
-    """Return a human-readable axis label for a flow column."""
-    return f"{col} (µL/min)" if "flow" in col.lower() else col
-
-
-def _time_label(col: str) -> str:
-    """Return a human-readable axis label for a time column."""
-    return "Time (seconds)" if col.lower() in ["t_s", "elapsed_s", "t"] else "Time"
+from .shared import flow_label, time_label
 
 
 def plot_time_series(
@@ -92,8 +79,8 @@ def plot_time_series(
         hovermode="x unified",
         dragmode="zoom",
         font=dict(size=12),
-        xaxis_title=_time_label(x_col),
-        yaxis_title=_flow_label(y_col),
+        xaxis_title=time_label(x_col),
+        yaxis_title=flow_label(y_col),
     )
     if y_range is not None:
         fig.update_yaxes(range=list(y_range))
@@ -124,7 +111,7 @@ def plot_constant_frequency_boxplot(
         title=title,
         height=height,
         margin=dict(l=20, r=20, t=40, b=20),
-        yaxis_title=_flow_label(y_col),
+        yaxis_title=flow_label(y_col),
         dragmode="zoom",
         font=dict(size=12),
         showlegend=False,
@@ -146,7 +133,7 @@ def plot_flow_histogram(
         x=y_col,
         nbins=nbins,
         title=title,
-        labels={y_col: _flow_label(y_col)},
+        labels={y_col: flow_label(y_col)},
     )
     fig.update_layout(
         height=height,
@@ -154,7 +141,7 @@ def plot_flow_histogram(
         hovermode="x",
         dragmode="zoom",
         font=dict(size=12),
-        xaxis_title=_flow_label(y_col),
+        xaxis_title=flow_label(y_col),
         yaxis_title="Frequency (count)",
     )
     fig.update_xaxes(title_font=dict(size=12))
@@ -292,7 +279,7 @@ def plot_sweep_all_points(
         font=dict(size=12),
         showlegend=True,
         xaxis_title="Frequency (Hz)",
-        yaxis_title=_flow_label(y_col),
+        yaxis_title=flow_label(y_col),
     )
     if y_range is not None:
         fig.update_yaxes(range=list(y_range))
@@ -367,7 +354,7 @@ def plot_sweep_binned(
         height=height,
         margin=dict(l=20, r=20, t=40, b=20),
         xaxis_title="Frequency (Hz)",
-        yaxis_title=_flow_label(y_col),
+        yaxis_title=flow_label(y_col),
         hovermode="x unified",
         dragmode="zoom",
         font=dict(size=12),
@@ -409,6 +396,33 @@ def export_html(
     export_dir.mkdir(parents=True, exist_ok=True)
     
     filepath = export_dir / filename
-    fig.write_html(str(filepath))
+    export_fig = _prepare_figure_for_html_export(fig)
+    export_fig.write_html(
+        str(filepath),
+        include_plotlyjs=True,
+        full_html=True,
+    )
     
     return filepath
+
+
+def _prepare_figure_for_html_export(fig: go.Figure) -> go.Figure:
+    """Return an HTML-export-safe copy of *fig*.
+
+    Standalone HTML files have been unreliable with ``Scattergl`` traces in
+    some environments, resulting in axes with no visible data. Convert those
+    traces to standard SVG ``scatter`` traces before saving.
+    """
+    export_fig = go.Figure(fig)
+    converted_traces = []
+    for trace in export_fig.data:
+        trace_dict = trace.to_plotly_json()
+        if trace_dict.get("type") == "scattergl":
+            trace_dict["type"] = "scatter"
+        converted_traces.append(trace_dict)
+
+    export_fig.data = ()
+    for trace_dict in converted_traces:
+        export_fig.add_trace(trace_dict)
+    export_fig.update_layout(fig.layout)
+    return export_fig

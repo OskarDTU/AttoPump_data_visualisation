@@ -77,11 +77,7 @@ from ..data.test_configs import (
     load_test_configs,
     save_test_config,
 )
-from ..data.app_settings import (
-    AppSettings,
-    load_settings,
-    save_settings,
-)
+from ..data.loader import load_csv_cached, resolve_data_path
 from ..data.test_catalog import (
     format_classification_summary,
     format_detection_method,
@@ -111,33 +107,16 @@ def main():
     """
     try:
         # ========================================================================
-        # PERSISTENT SETTINGS (disk-backed)
-        # ========================================================================
-        _app_settings = load_settings()
-
-        # ========================================================================
         # PAGE SETUP
         # ========================================================================
         st.title("AttoPump Data Visualization")
 
         # ========================================================================
-        # SIDEBAR: INPUT
+        # SIDEBAR: DATA SOURCE (shared widget — persists path automatically)
         # ========================================================================
+        data_folder_str, _, _ = resolve_data_path(key_suffix="ex", render_widget=False)
+
         with st.sidebar:
-            st.header("📁 Data Source")
-            
-            data_folder_str = st.text_input(
-                "Path to test data folder",
-                value=_app_settings.data_folder_path,
-                placeholder="/Users/.../All_tests",
-                help="Path is saved to disk automatically — you won't need to re-enter it.",
-            )
-
-            # Persist to disk whenever the value changes
-            if data_folder_str.strip() != _app_settings.data_folder_path:
-                _app_settings.data_folder_path = data_folder_str.strip()
-                save_settings(_app_settings)
-
             st.divider()
             st.header("📊 Options")
             auto_pick_csv = st.checkbox("Auto-pick best CSV", value=True, help="Prefer merged.csv, then trimmed_*.csv")

@@ -12,6 +12,7 @@ import pandas as pd
 from .data_processor import detect_test_type, load_test_metadata, parse_sweep_spec_from_name
 from .experiment_log import lookup_experiment_log_entry
 from .io_local import pick_best_csv
+from .pump_registry import PumpRegistry, get_pump_for_folder, load_registry as _load_pump_registry
 from .test_configs import get_test_config
 
 
@@ -170,11 +171,20 @@ def resolve_test_record(
         if not freq_series.empty and freq_series.nunique() == 1:
             csv_frequency_hz = float(freq_series.iloc[0])
 
-    pump_bar_id = str(_coalesce(
-        getattr(log_entry, "pump_bar_id", ""),
-        meta_entry.get("pump") if meta_entry else "",
-        "",
-    ) or "")
+    pump_bar_id = ""
+    # Priority: experiment log → pump registry → test_metadata fallback
+    if log_entry and getattr(log_entry, "pump_bar_id", ""):
+        pump_bar_id = str(log_entry.pump_bar_id)
+    else:
+        try:
+            _reg = _load_pump_registry()
+            _pump = get_pump_for_folder(_reg, run_name)
+            if _pump is not None:
+                pump_bar_id = _pump.name
+        except Exception:
+            pass
+    if not pump_bar_id and meta_entry and meta_entry.get("pump"):
+        pump_bar_id = str(meta_entry["pump"])
 
     raw_test_type = str(_coalesce(
         getattr(log_entry, "raw_test_type", ""),

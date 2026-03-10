@@ -1,0 +1,647 @@
+{
+  "_description": "Unified pump registry \u2014 maps physical pumps to test folders.",
+  "_version": 2,
+  "pumps": {
+    "PUMP 270226-1": {
+      "name": "PUMP 270226-1",
+      "tests": [
+        {
+          "folder": "20260227-1604-600Hz_1100H_Hz_500_seconds",
+          "test_type": "Sweep. 600Hz to 1100Hz. Sweep duration 500 seconds. Long test.",
+          "description": "",
+          "success": null,
+          "date": "2026-02-27",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260227-1702-PUMP-270226-1702",
+          "test_type": "Manual, constant frequency = 500Hz",
+          "description": "",
+          "success": null,
+          "date": "2026-02-27",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260227-1716-PUMP-270226-1716",
+          "test_type": "Manual, constant frequency = 500Hz",
+          "description": "",
+          "success": null,
+          "date": "2026-02-27",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260306-1155-1Hz_1500H_Hz_1_seconds",
+          "test_type": "Sweep. 1Hz to 1500Hz. Sweep duration 1 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2026-03-06",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260306-1329-1Hz_1500H_Hz_500_seconds",
+          "test_type": "Sweep. 1Hz to 1500Hz. Sweep duration 500 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2026-03-06",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260306-1357-300Hz_1000H_Hz_10_seconds",
+          "test_type": "Sweep. 300Hz to 1000Hz. Sweep duration 10 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2026-03-06",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260306-1408-300Hz_1000H_Hz_5_seconds",
+          "test_type": "Sweep. 300Hz to 1000Hz. Sweep duration 5 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2026-03-06",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260306-1415-300Hz_1000H_Hz_1_seconds",
+          "test_type": "Sweep. 300Hz to 1000Hz. Sweep duration 1 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2026-03-06",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260306-1422-1Hz_1500H_Hz_500_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 500 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2026-03-06",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        }
+      ],
+      "description": "PUMP 270226-1",
+      "notes": "",
+      "sub_groups": {},
+      "created_at": "2026-03-10T12:37:22+00:00"
+    },
+    "PUMP 270226-2": {
+      "name": "PUMP 270226-2",
+      "tests": [
+        {
+          "folder": "20260227-1740-1Hz_1500H_Hz_500_seconds",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "20260227-1820-PUMP-20260227-2",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "20260227-1832-PUMP-20260227-2",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "20260310-1316-500Hz-Pump-20260227-2",
+          "test_type": "Manual, constant frequency = 500Hz",
+          "description": "",
+          "success": null,
+          "date": "2026-03-10",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260310-1224-1Hz_1500H_Hz_500_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 500 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2026-03-10",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260310-1242-1Hz_1500H_Hz_1_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 1 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2026-03-10",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260310-1249-1Hz_1500H_Hz_500_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 500 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2026-03-10",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        }
+      ],
+      "description": "PUMP 270226-2",
+      "notes": "",
+      "sub_groups": {
+        "Verifying performance for Japan": {
+          "name": "Verifying performance for Japan",
+          "tests": [
+            "20260310-1316-500Hz-Pump-20260227-2",
+            "20260310-1224-1Hz_1500H_Hz_500_seconds",
+            "20260310-1242-1Hz_1500H_Hz_1_seconds",
+            "20260310-1249-1Hz_1500H_Hz_500_seconds"
+          ],
+          "description": "These four tests were different frequency sweeps done to characterise the performance for Japan."
+        }
+      },
+      "created_at": "2026-03-10T12:37:22+00:00"
+    },
+    "PUMP 270226-3": {
+      "name": "PUMP 270226-3",
+      "tests": [
+        {
+          "folder": "20260227-1850-1Hz_1500H_Hz_500_seconds",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "20260227-1930-PUMP-20260227-3",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "20260227-1941-PUMP-20260227-3",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "20260227-1956-PUMP-20260227-3",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "20260310-1335-1Hz_1500H_Hz_500_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 500 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-10",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260310-1457-1Hz_1500H_Hz_1_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 1 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-10",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260310-1504-1Hz_1500H_Hz_500_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 500 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-10",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260310-1542-1Hz_1500H_Hz_1_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 1 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-10",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260310-1544-1Hz_1500H_Hz_500_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 500 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-10",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260310-1617-500Hz-Pump-20260227-3",
+          "test_type": "Manual, constant frequency = 500Hz",
+          "description": "",
+          "success": null,
+          "date": "2025-03-10",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260310-1649-500Hz-Pump-20260227-3",
+          "test_type": "Manual, constant frequency = 500Hz",
+          "description": "",
+          "success": null,
+          "date": "2025-03-10",
+          "author": "Oskar",
+          "voltage": "2.5V",
+          "notes": ""
+        }
+      ],
+      "description": "PUMP 270226-3",
+      "notes": "",
+      "sub_groups": {
+        "Japan set 1 - failed": {
+          "name": "Japan set 1 - failed",
+          "tests": [
+            "20260310-1335-1Hz_1500H_Hz_500_seconds",
+            "20260310-1457-1Hz_1500H_Hz_1_seconds",
+            "20260310-1504-1Hz_1500H_Hz_500_seconds"
+          ],
+          "description": "Japan set 1 - failed"
+        },
+        "Japan set 2": {
+          "name": "Japan set 2",
+          "tests": [
+            "20260310-1649-500Hz-Pump-20260227-3",
+            "20260310-1617-500Hz-Pump-20260227-3",
+            "20260310-1544-1Hz_1500H_Hz_500_seconds",
+            "20260310-1542-1Hz_1500H_Hz_1_seconds"
+          ],
+          "description": "Japan set 1 - failed"
+        }
+      },
+      "created_at": "2026-03-10T12:37:22+00:00"
+    },
+    "PUMP 270226-4": {
+      "name": "PUMP 270226-4",
+      "tests": [
+        {
+          "folder": "20260302-1005-1Hz_1500H_Hz_500_seconds",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "20260302-1037-1Hz_1500H_Hz_500_seconds",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "20260302-1244-PUMP-20260227-4",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        }
+      ],
+      "description": "PUMP 270226-4",
+      "notes": "",
+      "sub_groups": {},
+      "created_at": "2026-03-10T12:37:22+00:00"
+    },
+    "Pump 020326": {
+      "name": "Pump 020326",
+      "tests": [
+        {
+          "folder": "20260302-1643-1Hz_1500H_Hz_500_seconds",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "20260302-1710-PUMP-20260302-5",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "Data_20260304_190431_0001",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        }
+      ],
+      "description": "Pump 020326",
+      "notes": "",
+      "sub_groups": {},
+      "created_at": "2026-03-10T12:37:22+00:00"
+    },
+    "Pump 2 - Niels": {
+      "name": "Pump 2 - Niels",
+      "tests": [
+        {
+          "folder": "20260224-1725-Bar3",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "Constant500Hz_Pump2_Niels_20260225_145652_0001",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        }
+      ],
+      "description": "Auto-imported from experiment log",
+      "notes": "",
+      "sub_groups": {},
+      "created_at": "2026-03-10T12:37:22+00:00"
+    },
+    "Pump 3 - Niels": {
+      "name": "Pump 3 - Niels",
+      "tests": [
+        {
+          "folder": "20260224-1735-Bar2",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "Test_Pump3_Niels_25022026_1348_20260225_135001_0001",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "Test2_Constant300Hz_Pump3_Niels_25022026_1348_20260225_135806_0001",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        }
+      ],
+      "description": "Auto-imported from experiment log",
+      "notes": "",
+      "sub_groups": {},
+      "created_at": "2026-03-10T12:37:22+00:00"
+    },
+    "Pump 1 - Niels": {
+      "name": "Pump 1 - Niels",
+      "tests": [
+        {
+          "folder": "20260226-1148-Bar1",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "Data_20260304_154904_0001",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        }
+      ],
+      "description": "Auto-imported from experiment log",
+      "notes": "",
+      "sub_groups": {},
+      "created_at": "2026-03-10T12:37:22+00:00"
+    },
+    "Pump 4 - Niels": {
+      "name": "Pump 4 - Niels",
+      "tests": [
+        {
+          "folder": "20260226-1401-Bar4",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "Data_20260304_162602_0001",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        }
+      ],
+      "description": "Auto-imported from experiment log",
+      "notes": "",
+      "sub_groups": {},
+      "created_at": "2026-03-10T12:37:22+00:00"
+    },
+    "Pump 5 - Niels": {
+      "name": "Pump 5 - Niels",
+      "tests": [
+        {
+          "folder": "20260226-1619-Bar5",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "20260226-1643-Bar5",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        }
+      ],
+      "description": "Auto-imported from experiment log",
+      "notes": "",
+      "sub_groups": {},
+      "created_at": "2026-03-10T12:37:22+00:00"
+    },
+    "Pump 6 - Niels": {
+      "name": "Pump 6 - Niels",
+      "tests": [
+        {
+          "folder": "20260226-1730-Bar6",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        }
+      ],
+      "description": "Auto-imported from experiment log",
+      "notes": "",
+      "sub_groups": {},
+      "created_at": "2026-03-10T12:37:22+00:00"
+    },
+    "Pump 7 - Niels": {
+      "name": "Pump 7 - Niels",
+      "tests": [
+        {
+          "folder": "Constant500_Pump7_Niels_20260303_151910_0001",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "Data_20260304_170216_0001",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        }
+      ],
+      "description": "Auto-imported from experiment log",
+      "notes": "",
+      "sub_groups": {},
+      "created_at": "2026-03-10T12:37:22+00:00"
+    },
+    "Pump 8 - Niels": {
+      "name": "Pump 8 - Niels",
+      "tests": [
+        {
+          "folder": "Constant500_Pump8_Niels_20260303_154533_0001",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "Data_20260304_173401_0001",
+          "test_type": "",
+          "description": "",
+          "success": null,
+          "date": "",
+          "author": "",
+          "voltage": "",
+          "notes": ""
+        }
+      ],
+      "description": "Auto-imported from experiment log",
+      "notes": "",
+      "sub_groups": {},
+      "created_at": "2026-03-10T12:37:22+00:00"
+    }
+  },
+  "shipments": {},
+  "test_groups": {},
+  "analysis_configs": {}
+}

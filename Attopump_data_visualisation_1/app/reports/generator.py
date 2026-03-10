@@ -78,8 +78,9 @@ class ReportDefinition:
         Which comparison types to generate.  Subset of:
         ``"sweep_overlay"``, ``"sweep_relative"``, ``"boxplots"``,
         ``"histograms"``, ``"summary_table"``, ``"individual_sweeps"``,
-        ``"global_average"``, ``"raw_points"``, ``"std_vs_mean"``,
-        ``"best_region"``, ``"correlation"``.
+        ``"global_average"``, ``"constant_time_series"``,
+        ``"raw_points"``, ``"std_vs_mean"``, ``"best_region"``,
+        ``"correlation"``.
     notes : str
         Free-text notes included in the report header.
     bin_hz : float
@@ -88,6 +89,8 @@ class ReportDefinition:
         Whether to include ±1 std bands on plots.
     show_individual_tests : bool
         Whether to show per-test lines behind bar averages.
+    selection_mode : str
+        ``"pumps"`` or ``"sub_groups"``.
     """
 
     title: str = "AttoPump Test Report"
@@ -100,6 +103,7 @@ class ReportDefinition:
     bin_hz: float = 5.0
     show_error_bars: bool = True
     show_individual_tests: bool = False
+    selection_mode: str = "pumps"
 
 
 # Available comparison types with labels
@@ -111,6 +115,7 @@ COMPARISON_OPTIONS: dict[str, str] = {
     "boxplots": "📦 Flow distribution boxplots",
     "histograms": "📊 Flow histograms",
     "summary_table": "📋 Summary statistics table",
+    "constant_time_series": "⏱️ Constant flow vs time",
     "raw_points": "⚡ All raw data points",
     "std_vs_mean": "📐 Std vs Mean scatter",
     "best_region": "🎯 Best operating region",
@@ -151,6 +156,7 @@ def save_report_definition(name: str, defn: ReportDefinition) -> None:
         "bin_hz": defn.bin_hz,
         "show_error_bars": defn.show_error_bars,
         "show_individual_tests": defn.show_individual_tests,
+        "selection_mode": defn.selection_mode,
         "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     with open(_REPORTS_PATH, "w") as f:
@@ -183,6 +189,7 @@ def load_report_definition(name: str) -> ReportDefinition | None:
         bin_hz=d.get("bin_hz", 5.0),
         show_error_bars=d.get("show_error_bars", True),
         show_individual_tests=d.get("show_individual_tests", False),
+        selection_mode=d.get("selection_mode", "pumps"),
     )
 
 
@@ -285,6 +292,7 @@ _CSS = """
     color: var(--muted);
     font-size: 0.9em;
     margin-bottom: 12px;
+    white-space: pre-line;
   }
   .report-table {
     width: 100%;

@@ -8,9 +8,15 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from ..data.app_settings import load_settings, save_settings
 from ..data.experiment_log import find_experiment_log
 from ..data.io_local import list_run_dirs, normalize_root
+from ..data.loader import resolve_data_path
+from ..data.pump_registry import (
+    PumpRegistry,
+    link_test,
+    migrate_legacy_files,
+    save_registry,
+)
 from ..data.test_catalog import (
     build_test_catalog_dataframe,
     format_classification_summary,
@@ -44,6 +50,12 @@ def _filter_catalog(df: pd.DataFrame, query: str, mode: str) -> pd.DataFrame:
         out = out[mask]
 
     return out.reset_index(drop=True)
+
+
+def _get_registry() -> PumpRegistry:
+    if "_pump_registry" not in st.session_state:
+        st.session_state["_pump_registry"] = migrate_legacy_files()
+    return st.session_state["_pump_registry"]
 
 
 def _render_detail_panel(root: Path, run_map: dict[str, Path], available_names: list[str]) -> None:
@@ -104,47 +116,92 @@ def _render_detail_panel(root: Path, run_map: dict[str, Path], available_names: 
         with st.expander("Notes", expanded=False):
             st.write(record.note)
 
+    # ── Action buttons ──────────────────────────────────────────
+    st.divider()
+    st.subheader("Actions")
+    reg = _get_registry()
+
+    # -- Assign to pump --
+    pump_names = list(reg.pumps.keys())
+    if pump_names:
+        acol1, acol2 = st.columns([2, 1])
+        with acol1:
+            assign_pump = st.selectbox(
+                "Assign this test to a pump",
+                options=pump_names,
+                index=None,
+                placeholder="Select a pump…",
+                key="overview_assign_pump",
+            )
+        with acol2:
+            st.write("")  # spacer
+            st.write("")
+            if st.button("Assign", key="overview_assign_btn", disabled=assign_pump is None):
+                from ..data.pump_registry import TestLink
+
+                link_test(reg, assign_pump, TestLink(folder=selected_name))
+                save_registry(reg)
+                st.success(f"Linked **{selected_name}** → **{assign_pump}**")
+                st.rerun()
+    else:
+        st.info("No pumps registered yet. Add pumps on the **Manage Groups** page.")
+
+    # -- Set / override test type --
+    from ..data.test_configs import TestConfig, save_test_config
+
+    type_options = ["sweep", "constant", "unknown"]
+    current_type = record.test_type or "unknown"
+    new_type = st.selectbox(
+        "Override test type",
+        options=type_options,
+        index=type_options.index(current_type) if current_type in type_options else 2,
+        key="overview_set_type",
+    )
+    if new_type != "unknown" and st.button("Save test type", key="overview_save_type_btn"):
+        save_test_config(selected_name, TestConfig(test_type=new_type))
+        st.success(f"Saved **{selected_name}** as **{new_type}**")
+        _build_catalog_cached.clear()
+        st.rerun()
+
+    # -- Quick navigation --
+    st.caption("Quick links")
+    bcol1, bcol2 = st.columns(2)
+    with bcol1:
+        if st.button("🔍 Open in Explorer", key="overview_goto_explorer"):
+            st.session_state["explorer_preselect"] = selected_name
+            st.switch_page("app/pages/explorer.py")
+    with bcol2:
+        if st.button("📊 Open in Analysis", key="overview_goto_analysis"):
+            st.session_state["analysis_preselect"] = selected_name
+            st.switch_page("app/pages/analysis.py")
+
 
 def main() -> None:
     """Entry point for the Test Overview page."""
     try:
-        settings = load_settings()
-
         st.title("🗂️ Test Overview")
         st.caption(
             "Resolved classifications and metadata across every discovered "
             "test folder, including gaps that still need attention."
         )
 
-        with st.sidebar:
-            st.header("📁 Data Source")
-            data_folder_str = st.text_input(
-                "Path to test data folder",
-                value=settings.data_folder_path,
-                placeholder="/Users/.../All_tests",
-                help="This should point at the All_tests folder.",
-            )
-            if data_folder_str.strip() != settings.data_folder_path:
-                settings.data_folder_path = data_folder_str.strip()
-                save_settings(settings)
+        data_folder_str, run_dirs, run_names_list = resolve_data_path(
+            key_suffix="to",
+            render_widget=False,
+        )
 
         if not data_folder_str.strip():
             st.info("Enter the All_tests folder path in the sidebar.")
             return
 
-        try:
-            root = normalize_root(data_folder_str)
-            run_dirs = list(list_run_dirs(root))
-        except Exception as exc:
-            st.error(f"❌ Failed to load test folders: {exc}")
-            return
+        root = normalize_root(data_folder_str)
 
         if not run_dirs:
             st.warning("No test folders were found under the selected path.")
             return
 
-        run_names = tuple(run_dir.name for run_dir in run_dirs)
-        run_map = {run_dir.name: run_dir for run_dir in run_dirs}
+        run_names = tuple(p.name for p in run_dirs)
+        run_map = {p.name: p for p in run_dirs}
         log_path = find_experiment_log(root)
         if log_path is None:
             st.warning(

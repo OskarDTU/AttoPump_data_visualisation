@@ -16,39 +16,12 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 from ..data.config import PLOT_HEIGHT
-
-# Distinct color palette: one colour per bar
-BAR_PALETTE = (
-    px.colors.qualitative.Bold
-    + px.colors.qualitative.Plotly
-    + px.colors.qualitative.Set1
-)
+from .shared import PUMP_PALETTE, color_to_rgba, flow_label
 
 
 def _bar_color(index: int) -> str:
     """Return a distinct colour for the *index*-th bar."""
-    return BAR_PALETTE[index % len(BAR_PALETTE)]
-
-
-def _color_to_rgba(color: str, alpha: float = 0.2) -> str:
-    """Convert any Plotly colour string to ``rgba(R, G, B, alpha)``."""
-    import re
-    m = re.match(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", color)
-    if m:
-        return f"rgba({m.group(1)}, {m.group(2)}, {m.group(3)}, {alpha})"
-    hex_color = color.lstrip("#")
-    if len(hex_color) == 6:
-        try:
-            r, g, b = int(hex_color[:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
-            return f"rgba({r}, {g}, {b}, {alpha})"
-        except ValueError:
-            pass
-    return f"rgba(128, 128, 128, {alpha})"
-
-
-def _flow_label(col: str) -> str:
-    """Return a human-readable axis label for a flow column."""
-    return f"{col} (µL/min)" if "flow" in col.lower() else col
+    return PUMP_PALETTE[index % len(PUMP_PALETTE)]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -90,7 +63,7 @@ def plot_bar_sweep_overlay(
                         x=tdf["freq_center"],
                         y=tdf["mean"],
                         mode="lines",
-                        line=dict(color=_color_to_rgba(color, 0.25), width=1),
+                        line=dict(color=color_to_rgba(color, 0.25), width=1),
                         name=f"{bar_name} / {test_name}",
                         legendgroup=bar_name,
                         showlegend=False,
@@ -116,7 +89,7 @@ def plot_bar_sweep_overlay(
         if show_error_bars and "std" in avg_df.columns:
             upper = avg_df["mean"] + avg_df["std"].fillna(0)
             lower = avg_df["mean"] - avg_df["std"].fillna(0)
-            fill = _color_to_rgba(color, 0.15)
+            fill = color_to_rgba(color, 0.15)
             fig.add_trace(
                 go.Scatter(
                     x=avg_df["freq_center"], y=upper,
@@ -221,7 +194,7 @@ def plot_bar_constant_boxplots(
     fig.update_layout(
         title="Constant-Frequency Flow – Bar Comparison",
         height=height,
-        yaxis_title=_flow_label(signal_col),
+        yaxis_title=flow_label(signal_col),
         dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
@@ -263,7 +236,7 @@ def plot_bar_constant_aggregated(
     fig.update_layout(
         title="Aggregated Constant-Frequency Flow per Bar",
         height=height,
-        yaxis_title=_flow_label(signal_col),
+        yaxis_title=flow_label(signal_col),
         dragmode="zoom",
         font=dict(size=12),
         margin=dict(l=20, r=20, t=50, b=20),
@@ -306,7 +279,7 @@ def plot_bar_constant_histograms(
         title="Constant-Frequency Flow Histograms – Bar Comparison",
         height=height,
         barmode="overlay",
-        xaxis_title=_flow_label(signal_col),
+        xaxis_title=flow_label(signal_col),
         yaxis_title="Count",
         dragmode="zoom",
         font=dict(size=12),

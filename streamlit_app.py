@@ -26,6 +26,7 @@ for _p in [str(_PROJECT / "src"), str(_PROJECT)]:
         sys.path.insert(0, _p)
 
 import streamlit as st
+from app.data.loader import render_data_source_sidebar
 
 
 # ------------------------------------------------------------------
@@ -62,6 +63,7 @@ def _run_manage_groups():
 # ------------------------------------------------------------------
 
 st.set_page_config(page_title="AttoPump Data Visualization", layout="wide")
+render_data_source_sidebar()
 
 pg = st.navigation(
     [

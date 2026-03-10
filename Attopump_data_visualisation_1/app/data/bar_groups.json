@@ -1,0 +1,113 @@
+{
+  "_description": "Pump groups, shipments, and test groups for AttoPump comparisons. Managed by the Manage Groups page.",
+  "bars": {
+    "PUMP 270226-1": {
+      "name": "PUMP 270226-1",
+      "tests": [],
+      "description": "PUMP 270226-1"
+    },
+    "PUMP 270226-2": {
+      "name": "PUMP 270226-2",
+      "tests": [
+        "20260227-1740-1Hz_1500H_Hz_500_seconds",
+        "20260227-1820-PUMP-20260227-2",
+        "20260227-1832-PUMP-20260227-2"
+      ],
+      "description": "PUMP 270226-2"
+    },
+    "PUMP 270226-3": {
+      "name": "PUMP 270226-3",
+      "tests": [
+        "20260227-1850-1Hz_1500H_Hz_500_seconds",
+        "20260227-1930-PUMP-20260227-3",
+        "20260227-1941-PUMP-20260227-3",
+        "20260227-1956-PUMP-20260227-3"
+      ],
+      "description": "PUMP 270226-3"
+    },
+    "PUMP 270226-4": {
+      "name": "PUMP 270226-4",
+      "tests": [
+        "20260302-1005-1Hz_1500H_Hz_500_seconds",
+        "20260302-1037-1Hz_1500H_Hz_500_seconds",
+        "20260302-1244-PUMP-20260227-4"
+      ],
+      "description": "PUMP 270226-4"
+    },
+    "Pump 020326": {
+      "name": "Pump 020326",
+      "tests": [
+        "20260302-1643-1Hz_1500H_Hz_500_seconds",
+        "20260302-1710-PUMP-20260302-5",
+        "Data_20260304_190431_0001"
+      ],
+      "description": "Pump 020326"
+    },
+    "Pump 2 - Niels": {
+      "name": "Pump 2 - Niels",
+      "tests": [
+        "20260224-1725-Bar3",
+        "Constant500Hz_Pump2_Niels_20260225_145652_0001"
+      ],
+      "description": "Auto-imported from experiment log"
+    },
+    "Pump 3 - Niels": {
+      "name": "Pump 3 - Niels",
+      "tests": [
+        "20260224-1735-Bar2",
+        "Test_Pump3_Niels_25022026_1348_20260225_135001_0001",
+        "Test2_Constant300Hz_Pump3_Niels_25022026_1348_20260225_135806_0001"
+      ],
+      "description": "Auto-imported from experiment log"
+    },
+    "Pump 1 - Niels": {
+      "name": "Pump 1 - Niels",
+      "tests": [
+        "20260226-1148-Bar1",
+        "Data_20260304_154904_0001"
+      ],
+      "description": "Auto-imported from experiment log"
+    },
+    "Pump 4 - Niels": {
+      "name": "Pump 4 - Niels",
+      "tests": [
+        "20260226-1401-Bar4",
+        "Data_20260304_162602_0001"
+      ],
+      "description": "Auto-imported from experiment log"
+    },
+    "Pump 5 - Niels": {
+      "name": "Pump 5 - Niels",
+      "tests": [
+        "20260226-1619-Bar5",
+        "20260226-1643-Bar5"
+      ],
+      "description": "Auto-imported from experiment log"
+    },
+    "Pump 6 - Niels": {
+      "name": "Pump 6 - Niels",
+      "tests": [
+        "20260226-1730-Bar6"
+      ],
+      "description": "Auto-imported from experiment log"
+    },
+    "Pump 7 - Niels": {
+      "name": "Pump 7 - Niels",
+      "tests": [
+        "Constant500_Pump7_Niels_20260303_151910_0001",
+        "Data_20260304_170216_0001"
+      ],
+      "description": "Auto-imported from experiment log"
+    },
+    "Pump 8 - Niels": {
+      "name": "Pump 8 - Niels",
+      "tests": [
+        "Constant500_Pump8_Niels_20260303_154533_0001",
+        "Data_20260304_173401_0001"
+      ],
+      "description": "Auto-imported from experiment log"
+    }
+  },
+  "shipments": {},
+  "test_groups": {}
+}
