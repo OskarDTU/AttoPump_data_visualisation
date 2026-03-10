@@ -32,6 +32,7 @@ def plot_bar_sweep_overlay(
     bar_binned: dict[str, dict[str, pd.DataFrame]],
     show_error_bars: bool = True,
     show_individual: bool = False,
+    bin_hz: float = 5.0,
     mode: str = "lines+markers",
     marker_size: int = 6,
     height: int = PLOT_HEIGHT,
@@ -51,7 +52,7 @@ def plot_bar_sweep_overlay(
         color = _bar_color(i)
 
         # Compute bar-level average across all its tests
-        avg_df = _average_binned(tests_binned)
+        avg_df = _average_binned(tests_binned, bin_hz=bin_hz)
         if avg_df.empty:
             continue
 
@@ -125,6 +126,7 @@ def plot_bar_sweep_overlay(
 
 def plot_bar_sweep_relative(
     bar_binned: dict[str, dict[str, pd.DataFrame]],
+    bin_hz: float = 5.0,
     mode: str = "lines+markers",
     marker_size: int = 6,
     height: int = PLOT_HEIGHT,
@@ -133,7 +135,7 @@ def plot_bar_sweep_relative(
     fig = go.Figure()
 
     for i, (bar_name, tests_binned) in enumerate(bar_binned.items()):
-        avg_df = _average_binned(tests_binned)
+        avg_df = _average_binned(tests_binned, bin_hz=bin_hz)
         if avg_df.empty:
             continue
         vals = avg_df["mean"].values

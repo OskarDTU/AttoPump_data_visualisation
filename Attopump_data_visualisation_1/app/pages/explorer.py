@@ -54,9 +54,10 @@ from ..data.config import (
 )
 from ..data.data_processor import (
     bin_by_frequency,
-    compute_frequency_average,
+    format_bin_choice_label,
     detect_test_type,
     detect_time_format,
+    explain_frequency_bin_recommendation,
     get_signal_columns,
     guess_signal_column,
     guess_time_column,
@@ -67,6 +68,7 @@ from ..data.data_processor import (
     prepare_constant_frequency_data,
     prepare_sweep_data,
     prepare_time_series_data,
+    recommend_frequency_bin_widths,
     save_metadata_entry,
     save_user_patterns,
 )
@@ -906,33 +908,7 @@ def main():
                 else:
                     st.warning("⚠️ Could not determine sweep parameters. Open the **Test Configuration** section above to define them, or the app will use the `freq_set_hz` column if available.")
 
-            # Binning & display options
-            col1, col2 = st.columns(2)
-            with col1:
-                bin_hz = st.slider(
-                    "📊 Frequency bin width (Hz)",
-                    min_value=0.5,
-                    max_value=100.0,
-                    value=float(PLOT_BIN_WIDTH_HZ),
-                    step=0.5,
-                    key="bin_hz_slider",
-                    help="Width of each frequency bin for the binned plot. "
-                         "Smaller = more detail but noisier. Larger = smoother.",
-                )
-            with col2:
-                max_points = st.slider(
-                    "Max points to plot",
-                    min_value=1000,
-                    max_value=500000,
-                    value=int(MAX_POINTS_DEFAULT),
-                    step=5000,
-                    key="max_points_slider",
-                    help="Limit the number of data points sent to the browser. "
-                         "Lower values = faster rendering. The full dataset is "
-                         "still used for binned statistics.",
-                )
-
-            # Prepare data: time series, sweep analysis
+            # Prepare data early so the bin recommendation can seed the slider.
             try:
                 ts_df = prepare_time_series_data(
                     df,
@@ -957,6 +933,55 @@ def main():
             except Exception as e:
                 st.error(f"❌ Failed to prepare sweep data: {e}")
                 st.stop()
+
+            bin_reco = recommend_frequency_bin_widths([sweep_df])
+            bin_signature = (
+                selected_run_name,
+                repr(sweep_spec),
+                len(sweep_df),
+            )
+            if st.session_state.get("_explorer_bin_signature") != bin_signature:
+                st.session_state["bin_hz_slider"] = bin_reco["test_bin_hz"]
+                st.session_state["_explorer_bin_signature"] = bin_signature
+                st.session_state["_explorer_bin_recommendation"] = bin_reco
+
+            # Binning & display options
+            col1, col2 = st.columns(2)
+            with col1:
+                bin_hz = st.slider(
+                    "📊 Frequency bin width (Hz)",
+                    min_value=0.5,
+                    max_value=100.0,
+                    value=float(PLOT_BIN_WIDTH_HZ),
+                    step=0.5,
+                    key="bin_hz_slider",
+                    help="Width of each frequency bin for the binned plot. "
+                         "Smaller = more detail but noisier. Larger = smoother.",
+                )
+                explorer_reco = st.session_state.get("_explorer_bin_recommendation")
+                if explorer_reco:
+                    st.caption(
+                        "Recommended for this sweep: "
+                        + explain_frequency_bin_recommendation(
+                            explorer_reco,
+                            include_average_bin=False,
+                        )
+                    )
+                    if st.button("Reset to recommended bin", key="explorer_reset_bin"):
+                        st.session_state["bin_hz_slider"] = explorer_reco["test_bin_hz"]
+                        st.rerun()
+            with col2:
+                max_points = st.slider(
+                    "Max points to plot",
+                    min_value=1000,
+                    max_value=500000,
+                    value=int(MAX_POINTS_DEFAULT),
+                    step=5000,
+                    key="max_points_slider",
+                    help="Limit the number of data points sent to the browser. "
+                         "Lower values = faster rendering. The full dataset is "
+                         "still used for binned statistics.",
+                )
 
             # Create tabs
             tab_ts, tab_freq = st.tabs(["⏱️ Time Series", "📊 Frequency Analysis"])
@@ -1030,11 +1055,14 @@ def main():
                 avg_df = None
                 if show_average:
                     try:
-                        avg_df = compute_frequency_average(
+                        avg_df = bin_by_frequency(
                             sweep_df,
                             value_col=signal_col,
                             freq_col="Frequency",
+                            bin_hz=float(bin_hz),
                         )
+                        avg_df = avg_df.rename(columns={"freq_center": "freq"})
+                        avg_df = avg_df[[col for col in ["freq", "mean", "std"] if col in avg_df.columns]]
                     except Exception:
                         avg_df = None
 
@@ -1042,6 +1070,10 @@ def main():
                 pts_df = sweep_df.head(int(max_points))
 
                 try:
+                    st.caption(
+                        "This figure shows raw sweep points. The selected bin width is applied to the "
+                        "binned plot below and, when enabled, to the black average overlay here."
+                    )
                     fig_pts = plot_sweep_all_points(
                         pts_df,
                         x_col="Frequency",
@@ -1089,7 +1121,7 @@ def main():
                             std_col="std",
                             title=(
                                 f"{selected_run_name} — Binned Mean ± Std"
-                                f"  ({n_bins} bins, {bin_hz:g} Hz each)"
+                                f"  ({n_bins} bins, {format_bin_choice_label(float(bin_hz), explorer_reco)})"
                             ),
                             mode=plot_mode,
                             marker_size=marker_size,

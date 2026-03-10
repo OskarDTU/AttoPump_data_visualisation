@@ -39,12 +39,15 @@ from ..data.data_processor import (
     detect_constant_frequency,
     detect_test_type,
     detect_time_format,
+    explain_frequency_bin_recommendation,
     extract_frequency_slice,
+    format_bin_choice_label,
     guess_signal_column,
     guess_time_column,
     parse_sweep_spec_from_name,
     prepare_sweep_data,
     prepare_time_series_data,
+    recommend_frequency_bin_widths,
 )
 from ..data.loader import load_csv_cached, resolve_data_path
 from ..data.pump_registry import (
@@ -82,6 +85,7 @@ from ..plots.bar_comparison_plots import (
     plot_bar_sweep_relative,
 )
 from ..plots.plot_generator import export_html, plot_sweep_binned
+from ..plot_guidance import render_plot_guide
 from .unknown_test_prompt import classify_tests_quick, render_unknown_test_prompt
 
 
@@ -131,6 +135,191 @@ def _build_saved_test_group_options(
             }
 
     return saved_test_groups, pump_sub_groups
+
+
+@st.cache_data(show_spinner=False)
+def _recommend_bins_for_tests_cached(
+    test_names: tuple[str, ...],
+    run_names: tuple[str, ...],
+    run_dir_strs: tuple[str, ...],
+) -> dict[str, float] | None:
+    """Compute recommended sweep bin widths for a concrete test selection."""
+    if not test_names:
+        return None
+
+    sweep_frames: list[pd.DataFrame] = []
+    for name in test_names:
+        if name not in run_names:
+            continue
+        idx = run_names.index(name)
+        run_dir = Path(run_dir_strs[idx])
+        pick = pick_best_csv(run_dir)
+        df = load_csv_cached(str(pick.csv_path))
+        if df.empty:
+            continue
+
+        time_col = guess_time_column(df)
+        sig_col = guess_signal_column(df, "flow")
+        if not time_col or not sig_col:
+            continue
+
+        time_fmt = detect_time_format(df, time_col)
+        ts_df = prepare_time_series_data(
+            df,
+            time_col,
+            sig_col,
+            parse_time=(time_fmt == "absolute_timestamp"),
+        )
+        ttype, _, _ = detect_test_type(name, df, data_root=run_dir.parent)
+        has_freq = "freq_set_hz" in df.columns
+        spec = parse_sweep_spec_from_name(name)
+        is_sweep = ttype == "sweep" or (
+            has_freq and df["freq_set_hz"].dropna().nunique() > 1
+        )
+        if not is_sweep or (not has_freq and not (spec and spec.duration_s > 0)):
+            continue
+
+        sweep_frames.append(
+            prepare_sweep_data(
+                ts_df,
+                time_col,
+                sig_col,
+                spec=spec,
+                parse_time=(time_fmt == "absolute_timestamp"),
+                full_df=df if has_freq else None,
+            )
+        )
+
+    if not sweep_frames:
+        return None
+    return recommend_frequency_bin_widths(sweep_frames)
+
+
+def _current_analysis_test_selection(
+    reg: PumpRegistry,
+    run_names: list[str],
+) -> list[str]:
+    """Infer the current analysis selection from session state for auto binning."""
+    mode = st.session_state.get("a_toplevel", "📊 Compare Tests")
+
+    if mode == "📊 Compare Tests":
+        if st.session_state.get("ct_sel") == "Load a saved test group":
+            saved_test_groups, pump_sub_groups = _build_saved_test_group_options(reg)
+            saved_source = st.session_state.get("ct_saved_source")
+            if saved_source == "Pump sub-groups":
+                pump_name = st.session_state.get("ct_saved_pump")
+                group_name = st.session_state.get("ct_saved_subgroup")
+                if pump_name in pump_sub_groups and group_name in pump_sub_groups[pump_name]:
+                    return [
+                        name
+                        for name in pump_sub_groups[pump_name][group_name]["tests"]
+                        if name in run_names
+                    ]
+            chosen_label = st.session_state.get("ct_grp", "")
+            if chosen_label.startswith("Test group / "):
+                group_name = chosen_label.replace("Test group / ", "", 1)
+                if group_name in saved_test_groups:
+                    return [
+                        name
+                        for name in saved_test_groups[group_name]["tests"]
+                        if name in run_names
+                    ]
+            if chosen_label.startswith("Pump sub-group / "):
+                _, pump_name, group_name = chosen_label.split(" / ", 2)
+                if pump_name in pump_sub_groups and group_name in pump_sub_groups[pump_name]:
+                    return [
+                        name
+                        for name in pump_sub_groups[pump_name][group_name]["tests"]
+                        if name in run_names
+                    ]
+            return []
+        return [name for name in st.session_state.get("ct_multi", []) if name in run_names]
+
+    if mode == "🔧 Single Pump Analysis":
+        pump_name = st.session_state.get("single_pump_name")
+        pump = reg.pumps.get(pump_name)
+        if pump is None:
+            return []
+        scope = st.session_state.get(
+            "single_pump_scope",
+            "Analyze tests in this pump",
+        )
+        if scope == "Compare saved groups":
+            chosen_groups = st.session_state.get("single_pump_group_compare", [])
+            selected: list[str] = []
+            for group_name in chosen_groups:
+                group = pump.sub_groups.get(group_name)
+                if group is not None:
+                    selected.extend(name for name in group.tests if name in run_names)
+            return selected
+        if scope == "Analyze one saved group":
+            group_name = st.session_state.get("single_pump_group_one")
+            group = pump.sub_groups.get(group_name)
+            return [name for name in (group.tests if group else []) if name in run_names]
+        if st.session_state.get("single_pump_test_selection_mode") == "Pick linked tests manually":
+            return [
+                name
+                for name in st.session_state.get("single_pump_manual_tests", [])
+                if name in run_names
+            ]
+        return [test.folder for test in pump.tests if test.folder in run_names]
+
+    if mode == "📦 Compare Pumps":
+        selected_pumps: list[str] = []
+        if st.session_state.get("cb_sel") == "Load a saved shipment":
+            shipment_names = list(reg.shipments.keys())
+            chosen_idx = st.session_state.get("cb_ship", 0)
+            if shipment_names and 0 <= chosen_idx < len(shipment_names):
+                shipment = reg.shipments[shipment_names[chosen_idx]]
+                selected_pumps = [name for name in shipment.pumps if name in reg.pumps]
+        else:
+            selected_pumps = [
+                name for name in st.session_state.get("cb_pumps", []) if name in reg.pumps
+            ]
+        selected: list[str] = []
+        for pump_name in selected_pumps:
+            selected.extend(
+                test.folder
+                for test in reg.pumps[pump_name].tests
+                if test.folder in run_names
+            )
+        return selected
+
+    return []
+
+
+def _maybe_seed_analysis_bin_defaults(
+    reg: PumpRegistry,
+    run_names: list[str],
+    run_dirs: list,
+) -> None:
+    """Seed the analysis sliders from the current selection when it changes."""
+    if st.session_state.get("a_cfg") not in {None, "(manual)"}:
+        st.session_state.pop("_analysis_bin_recommendation", None)
+        return
+
+    selected_tests = tuple(sorted(set(_current_analysis_test_selection(reg, run_names))))
+    if not selected_tests:
+        st.session_state.pop("_analysis_bin_recommendation", None)
+        return
+
+    signature = ("analysis", selected_tests)
+    if st.session_state.get("_analysis_bin_signature") == signature:
+        return
+
+    recommendation = _recommend_bins_for_tests_cached(
+        selected_tests,
+        tuple(run_names),
+        tuple(str(path) for path in run_dirs),
+    )
+    if not recommendation:
+        st.session_state.pop("_analysis_bin_recommendation", None)
+        return
+
+    st.session_state["a_bin"] = recommendation["test_bin_hz"]
+    st.session_state["a_avg"] = recommendation["average_bin_hz"]
+    st.session_state["_analysis_bin_signature"] = signature
+    st.session_state["_analysis_bin_recommendation"] = recommendation
 
 
 TEST_ANALYSIS_PLOTS = [
@@ -269,13 +458,22 @@ def _render_plot_selector(
 ) -> list[str]:
     """Render the current plot-selection control."""
     _prime_plot_selection_state(widget_key, allowed_plot_ids, default_plot_ids)
-    st.markdown(f"**{title}**")
-    return st.multiselect(
-        "Plots / analyses to run",
-        allowed_plot_ids,
-        format_func=lambda plot_id: AVAILABLE_PLOTS.get(plot_id, plot_id),
-        key=widget_key,
-    )
+    left_col, right_col = st.columns([3.2, 1.8])
+    with left_col:
+        st.markdown(f"**{title}**")
+        selected = st.multiselect(
+            "Plots / analyses to run",
+            allowed_plot_ids,
+            format_func=lambda plot_id: AVAILABLE_PLOTS.get(plot_id, plot_id),
+            key=widget_key,
+        )
+    with right_col:
+        render_plot_guide(
+            allowed_plot_ids,
+            key_prefix=widget_key,
+            label_lookup=AVAILABLE_PLOTS,
+        )
+    return selected
 
 
 def _render_save_analysis_config_form(
@@ -459,6 +657,7 @@ def main() -> None:  # noqa: C901
             run_names,
             key_prefix="analysis",
         )
+        _maybe_seed_analysis_bin_defaults(reg, run_names, run_dirs)
         with st.sidebar:
             st.divider()
             st.header("📂 Load Config")
@@ -485,6 +684,16 @@ def main() -> None:  # noqa: C901
                 "Average-curve bin width (Hz)", 0.5, 100.0,
                 3.0, 0.5, key="a_avg",
             )
+            bin_reco = st.session_state.get("_analysis_bin_recommendation")
+            if bin_reco:
+                st.caption(
+                    "Recommended for current selection: "
+                    + explain_frequency_bin_recommendation(bin_reco)
+                )
+                if st.button("Reset bins to recommended", key="a_reset_bins"):
+                    st.session_state["a_bin"] = bin_reco["test_bin_hz"]
+                    st.session_state["a_avg"] = bin_reco["average_bin_hz"]
+                    st.rerun()
             show_all_points = st.checkbox(
                 "Plot all raw data points",
                 value=True,
@@ -1211,6 +1420,7 @@ def _render_sweep_analysis(
         return
 
     tabs = st.tabs([label for label, _ in tab_specs])
+    bin_reco = st.session_state.get("_analysis_bin_recommendation")
 
     for tab, (_, tab_key) in zip(tabs, tab_specs):
         with tab:
@@ -1223,7 +1433,10 @@ def _render_sweep_analysis(
                     with st.expander(f"📈 {name}", expanded=(n_binned <= 3)):
                         fig_b = plot_sweep_binned(
                             binned_data[name],
-                            title=f"{name} — Binned (Δf = {S['bin_hz']:g} Hz)",
+                            title=(
+                                f"{name} — Binned "
+                                f"({format_bin_choice_label(float(S['bin_hz']), bin_reco)})"
+                            ),
                             mode=S["plot_mode"],
                             marker_size=S["marker_sz"],
                             show_error_bars=S["err_bars"],
@@ -1264,6 +1477,10 @@ def _render_sweep_analysis(
                     fig_comb = plot_combined_overlay(
                         binned_data,
                         show_error_bars=S["err_bars"],
+                        title=(
+                            "Combined Frequency Sweep Comparison "
+                            f"({format_bin_choice_label(float(S['bin_hz']), bin_reco)})"
+                        ),
                         mode=S["plot_mode"],
                         marker_size=S["marker_sz"],
                     )
@@ -1275,6 +1492,10 @@ def _render_sweep_analysis(
                     st.subheader("Relative (0–100 %) Comparison")
                     fig_rel = plot_relative_comparison(
                         binned_data,
+                        title=(
+                            "Relative Flow (0–100 %) Comparison "
+                            f"({format_bin_choice_label(float(S['bin_hz']), bin_reco)})"
+                        ),
                         mode=S["plot_mode"],
                         marker_size=S["marker_sz"],
                     )
@@ -1289,6 +1510,10 @@ def _render_sweep_analysis(
                 fig_avg, avg_df = plot_global_average(
                     binned_data,
                     bin_hz=S["avg_bin_hz"],
+                    title=(
+                        "Global Average Across Tests "
+                        f"({format_bin_choice_label(float(S['avg_bin_hz']), bin_reco, use_average_bin=True)})"
+                    ),
                     mode=S["plot_mode"],
                     marker_size=S["marker_sz"],
                     show_error_bars=S["err_bars"],
@@ -1809,6 +2034,7 @@ def _render_collection_comparison(
         return
 
     tabs = st.tabs([label for label, _ in tab_specs])
+    bin_reco = st.session_state.get("_analysis_bin_recommendation")
     for tab, (_, tab_key) in zip(tabs, tab_specs):
         with tab:
             if tab_key == "sweep_overlay":
@@ -1820,10 +2046,17 @@ def _render_collection_comparison(
                 )
                 fig = plot_bar_sweep_overlay(
                     collection_sweep_binned,
+                    bin_hz=scoped_settings["avg_bin_hz"],
                     show_error_bars=scoped_settings["err_bars"],
                     show_individual=show_individual,
                     mode=scoped_settings["plot_mode"],
                     marker_size=scoped_settings["marker_sz"],
+                )
+                fig.update_layout(
+                    title=(
+                        f"Frequency Sweep — {collection_label.title()} Comparison "
+                        f"({format_bin_choice_label(float(scoped_settings['avg_bin_hz']), bin_reco, use_average_bin=True)})"
+                    )
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 _maybe_export(fig, f"{collection_label}_sweep_overlay.html", scoped_settings)
@@ -1834,8 +2067,15 @@ def _render_collection_comparison(
                 )
                 fig = plot_bar_sweep_relative(
                     collection_sweep_binned,
+                    bin_hz=scoped_settings["avg_bin_hz"],
                     mode=scoped_settings["plot_mode"],
                     marker_size=scoped_settings["marker_sz"],
+                )
+                fig.update_layout(
+                    title=(
+                        f"Relative (0–100 %) — {collection_label.title()} Comparison "
+                        f"({format_bin_choice_label(float(scoped_settings['avg_bin_hz']), bin_reco, use_average_bin=True)})"
+                    )
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 _maybe_export(fig, f"{collection_label}_sweep_relative.html", scoped_settings)

@@ -565,6 +565,154 @@ def bin_by_frequency(
     return binned.sort_values("freq_center")
 
 
+def recommend_frequency_bin_widths(
+    sweep_frames: list[pd.DataFrame] | dict[str, pd.DataFrame],
+    *,
+    freq_col: str = "Frequency",
+    sweep_col: str = "Sweep",
+    min_bin_hz: float = 0.5,
+    max_bin_hz: float = 100.0,
+    step_hz: float = 0.5,
+) -> dict[str, float]:
+    """Recommend smoothing-oriented frequency bin widths for sweep comparison.
+
+    The heuristic is intentionally conservative: it measures the dominant
+    frequency spacing inside the sweeps and the spread of where individual
+    sweeps begin. The returned widths are then rounded to the UI step size.
+
+    Returns
+    -------
+    dict[str, float]
+        Keys:
+        - ``test_bin_hz``: good starting width for per-test binning.
+        - ``average_bin_hz``: slightly wider width for cross-test averages.
+        - ``typical_step_hz``: median positive frequency spacing observed.
+        - ``start_spread_hz``: robust spread of sweep start frequencies.
+    """
+    if isinstance(sweep_frames, dict):
+        frames = list(sweep_frames.values())
+    else:
+        frames = list(sweep_frames)
+
+    def _snap(value: float) -> float:
+        return round(max(min_bin_hz, min(max_bin_hz, value)) / step_hz) * step_hz
+
+    positive_steps: list[float] = []
+    start_freqs: list[float] = []
+
+    for frame in frames:
+        if frame.empty or freq_col not in frame.columns:
+            continue
+
+        freqs = pd.to_numeric(frame[freq_col], errors="coerce").to_numpy(dtype=float)
+        freqs = freqs[np.isfinite(freqs)]
+        if freqs.size == 0:
+            continue
+
+        unique_freqs = np.unique(np.round(freqs, 6))
+        if unique_freqs.size > 1:
+            diffs = np.diff(np.sort(unique_freqs))
+            diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+            if diffs.size:
+                positive_steps.extend(diffs.tolist())
+
+        if sweep_col in frame.columns:
+            starts = (
+                frame.groupby(sweep_col, sort=True)[freq_col]
+                .first()
+                .pipe(pd.to_numeric, errors="coerce")
+                .dropna()
+                .astype(float)
+                .tolist()
+            )
+            start_freqs.extend(starts)
+        else:
+            start_freqs.append(float(freqs[0]))
+
+    typical_step_hz = (
+        float(np.median(positive_steps))
+        if positive_steps
+        else max(min_bin_hz, step_hz)
+    )
+    sorted_starts = np.sort(np.asarray(start_freqs, dtype=float)) if start_freqs else np.array([])
+    start_gaps = (
+        np.diff(sorted_starts)
+        if sorted_starts.size >= 2
+        else np.array([])
+    )
+    start_alignment_gap_hz = (
+        float(np.max(start_gaps))
+        if start_gaps.size
+        else 0.0
+    )
+    start_spread_hz = (
+        float(np.percentile(start_freqs, 90) - np.percentile(start_freqs, 10))
+        if len(start_freqs) >= 2
+        else 0.0
+    )
+
+    test_bin_hz = _snap(
+        max(
+            typical_step_hz,
+            start_alignment_gap_hz + step_hz,
+            min_bin_hz,
+        )
+    )
+    average_bin_hz = _snap(
+        max(
+            test_bin_hz,
+            start_alignment_gap_hz + (2.0 * step_hz),
+            typical_step_hz * 2.0,
+        )
+    )
+
+    return {
+        "test_bin_hz": float(max(min_bin_hz, min(max_bin_hz, test_bin_hz))),
+        "average_bin_hz": float(max(min_bin_hz, min(max_bin_hz, average_bin_hz))),
+        "typical_step_hz": float(typical_step_hz),
+        "start_alignment_gap_hz": float(start_alignment_gap_hz),
+        "start_spread_hz": float(start_spread_hz),
+    }
+
+
+def explain_frequency_bin_recommendation(
+    recommendation: dict[str, float],
+    *,
+    include_average_bin: bool = True,
+) -> str:
+    """Format a human-readable explanation of the bin recommendation."""
+    text = (
+        f"Typical frequency step = {recommendation['typical_step_hz']:.1f} Hz; "
+        f"largest start-point offset = {recommendation['start_alignment_gap_hz']:.1f} Hz; "
+        f"sweep-start spread = {recommendation['start_spread_hz']:.1f} Hz; "
+        f"recommended test bin = {recommendation['test_bin_hz']:.1f} Hz"
+    )
+    if include_average_bin:
+        text += (
+            f"; recommended average bin = "
+            f"{recommendation['average_bin_hz']:.1f} Hz"
+        )
+    return text + "."
+
+
+def format_bin_choice_label(
+    selected_bin_hz: float,
+    recommendation: dict[str, float] | None = None,
+    *,
+    use_average_bin: bool = False,
+) -> str:
+    """Format a short label showing selected vs recommended bin width."""
+    label = f"selected Δf = {selected_bin_hz:g} Hz"
+    if recommendation:
+        reco_key = "average_bin_hz" if use_average_bin else "test_bin_hz"
+        recommended = float(recommendation[reco_key])
+        if abs(recommended - float(selected_bin_hz)) < 1e-9:
+            label += " · matches recommended"
+        else:
+            label += f" · recommended Δf = {recommended:g} Hz"
+    return label
+
+
 def compute_frequency_average(
     df: pd.DataFrame,
     value_col: str,

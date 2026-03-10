@@ -37,11 +37,14 @@ from ..data.data_processor import (
     detect_constant_frequency,
     detect_test_type,
     detect_time_format,
+    explain_frequency_bin_recommendation,
+    format_bin_choice_label,
     guess_signal_column,
     guess_time_column,
     parse_sweep_spec_from_name,
     prepare_sweep_data,
     prepare_time_series_data,
+    recommend_frequency_bin_widths,
 )
 from ..data.loader import load_csv_cached, resolve_data_path
 from ..data.pump_registry import (
@@ -73,6 +76,7 @@ from ..reports.generator import (
     save_report,
     save_report_definition,
 )
+from ..plot_guidance import render_plot_guide
 from .unknown_test_prompt import classify_tests_quick, render_unknown_test_prompt
 
 # Lazy-import heavy plot modules only when needed
@@ -251,6 +255,66 @@ def _apply_template_to_session_state(
     for key, value in _template_widget_defaults(loaded_defn).items():
         st.session_state[key] = value
     st.session_state.pop("rb_html", None)
+    st.session_state.pop("_rb_bin_signature", None)
+    st.session_state.pop("_rb_bin_recommendation", None)
+
+
+@st.cache_data(show_spinner=False)
+def _recommend_report_bin_cached(
+    folder_names: tuple[str, ...],
+    run_names: tuple[str, ...],
+    run_dir_strs: tuple[str, ...],
+) -> dict[str, float] | None:
+    """Recommend a smoothing-oriented bin width for the selected report tests."""
+    if not folder_names:
+        return None
+
+    sweep_frames: list[pd.DataFrame] = []
+    for name in folder_names:
+        if name not in run_names:
+            continue
+        idx = run_names.index(name)
+        run_dir = Path(run_dir_strs[idx])
+        pick = pick_best_csv(run_dir)
+        df = load_csv_cached(str(pick.csv_path))
+        if df.empty:
+            continue
+
+        time_col = guess_time_column(df)
+        sig_col = guess_signal_column(df, "flow")
+        if not time_col or not sig_col:
+            continue
+
+        time_fmt = detect_time_format(df, time_col)
+        ts_df = prepare_time_series_data(
+            df,
+            time_col,
+            sig_col,
+            parse_time=(time_fmt == "absolute_timestamp"),
+        )
+        ttype, _, _ = detect_test_type(name, df, data_root=run_dir.parent)
+        has_freq = "freq_set_hz" in df.columns
+        spec = parse_sweep_spec_from_name(name)
+        is_sweep = ttype == "sweep" or (
+            has_freq and df["freq_set_hz"].dropna().nunique() > 1
+        )
+        if not is_sweep or (not has_freq and not (spec and spec.duration_s > 0)):
+            continue
+
+        sweep_frames.append(
+            prepare_sweep_data(
+                ts_df,
+                time_col,
+                sig_col,
+                spec=spec,
+                parse_time=(time_fmt == "absolute_timestamp"),
+                full_df=df if has_freq else None,
+            )
+        )
+
+    if not sweep_frames:
+        return None
+    return recommend_frequency_bin_widths(sweep_frames)
 
 
 def _build_report_target_options(
@@ -940,19 +1004,54 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
         st.info("👆 Select at least one report target to continue.")
         return
 
+    if load_choice == "(new report)":
+        selected_folders: list[str] = []
+        for entry_id in selected_entries:
+            resolved = _resolve_report_entry(entry_id, reg, run_names)
+            if resolved is None:
+                continue
+            _, folders, _ = resolved
+            selected_folders.extend(folders)
+        bin_signature = (
+            "report_builder",
+            tuple(sorted(selected_entries)),
+            tuple(sorted(selected_folders)),
+        )
+        if st.session_state.get("_rb_bin_signature") != bin_signature:
+            recommendation = _recommend_report_bin_cached(
+                tuple(sorted(set(selected_folders))),
+                tuple(run_names),
+                tuple(str(path) for path in run_dirs),
+            )
+            if recommendation:
+                st.session_state["rb_bin"] = recommendation["average_bin_hz"]
+                st.session_state["_rb_bin_signature"] = bin_signature
+                st.session_state["_rb_bin_recommendation"] = recommendation
+            else:
+                st.session_state.pop("_rb_bin_recommendation", None)
+                st.session_state["_rb_bin_signature"] = bin_signature
+
     st.caption(
         f"Selected {len(selected_entries)} report target(s) with "
         f"{sum(1 for entry_id in selected_entries if entry_id in target_options)} currently available."
     )
 
     # ── Comparison types ────────────────────────────────────────
-    st.subheader("📊 Comparisons")
-    selected_comparisons = st.multiselect(
-        "Choose what to include in the report",
-        list(COMPARISON_OPTIONS.keys()),
-        format_func=lambda k: COMPARISON_OPTIONS[k],
-        key="rb_comparisons",
-    )
+    left_col, right_col = st.columns([3.2, 1.8])
+    with left_col:
+        st.subheader("📊 Comparisons")
+        selected_comparisons = st.multiselect(
+            "Choose what to include in the report",
+            list(COMPARISON_OPTIONS.keys()),
+            format_func=lambda k: COMPARISON_OPTIONS[k],
+            key="rb_comparisons",
+        )
+    with right_col:
+        render_plot_guide(
+            selected_comparisons or list(COMPARISON_OPTIONS.keys()),
+            key_prefix="rb_comparisons",
+            label_lookup=COMPARISON_OPTIONS,
+        )
     if selected_comparisons:
         st.caption(
             "Included comparison blocks: "
@@ -978,6 +1077,15 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
             "Include raw all-sweeps layer for individual sweep diagnostics",
             key="rb_raw_all_sweeps",
         )
+        bin_reco = st.session_state.get("_rb_bin_recommendation")
+        if load_choice == "(new report)" and bin_reco:
+            st.caption(
+                "Recommended smoothing bin for current selection: "
+                + explain_frequency_bin_recommendation(bin_reco)
+            )
+            if st.button("Reset bin to recommended", key="rb_reset_bin"):
+                st.session_state["rb_bin"] = bin_reco["average_bin_hz"]
+                st.rerun()
 
     # ── Build definition ────────────────────────────────────────
     defn = ReportDefinition(
@@ -1241,17 +1349,28 @@ def _add_comparison_section(
     bcp,
 ) -> None:
     """Add section(s) for one comparison type."""
+    bin_reco = st.session_state.get("_rb_bin_recommendation")
 
     if comp == "sweep_overlay":
         if bar_binned:
             fig = bcp.plot_bar_sweep_overlay(
                 bar_binned,
+                bin_hz=defn.bin_hz,
                 show_error_bars=defn.show_error_bars,
                 show_individual=defn.show_individual_tests,
             )
+            fig.update_layout(
+                title=(
+                    "Frequency Sweep — Report Target Comparison "
+                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco, use_average_bin=True)})"
+                )
+            )
             sections.append(ReportSection(
                 kind="plot",
-                title="Frequency Sweep — Report Target Comparison",
+                title=(
+                    "Frequency Sweep — Report Target Comparison "
+                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco, use_average_bin=True)})"
+                ),
                 content=fig,
                 description=_build_section_description(
                     "What you are seeing: each thick curve is the average frequency-response for one selected report target.",
@@ -1280,10 +1399,17 @@ def _add_comparison_section(
             fig = ap.plot_combined_overlay(
                 display_binned,
                 show_error_bars=defn.show_error_bars,
+                title=(
+                    "Frequency Sweep — All Tests Overlay "
+                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
+                ),
             )
             sections.append(ReportSection(
                 kind="plot",
-                title="Frequency Sweep — All Tests Overlay",
+                title=(
+                    "Frequency Sweep — All Tests Overlay "
+                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
+                ),
                 content=fig,
                 description=_build_section_description(
                     "What you are seeing: each curve is one individual test after frequency binning.",
@@ -1302,10 +1428,19 @@ def _add_comparison_section(
 
     elif comp == "sweep_relative":
         if bar_binned:
-            fig = bcp.plot_bar_sweep_relative(bar_binned)
+            fig = bcp.plot_bar_sweep_relative(bar_binned, bin_hz=defn.bin_hz)
+            fig.update_layout(
+                title=(
+                    "Relative Sweep (0–100 %) — Report Target Comparison "
+                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco, use_average_bin=True)})"
+                )
+            )
             sections.append(ReportSection(
                 kind="plot",
-                title="Relative Sweep (0–100 %) — Report Target Comparison",
+                title=(
+                    "Relative Sweep (0–100 %) — Report Target Comparison "
+                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco, use_average_bin=True)})"
+                ),
                 content=fig,
                 description=_build_section_description(
                     "What you are seeing: each target’s average sweep has been rescaled so its own minimum becomes 0% and its own maximum becomes 100%.",
@@ -1321,10 +1456,19 @@ def _add_comparison_section(
                 ),
             ))
         if len(display_binned) > 1:
-            fig = ap.plot_relative_comparison(display_binned)
+            fig = ap.plot_relative_comparison(
+                display_binned,
+                title=(
+                    "Relative Sweep (0–100 %) — All Tests "
+                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
+                ),
+            )
             sections.append(ReportSection(
                 kind="plot",
-                title="Relative Sweep (0–100 %) — All Tests",
+                title=(
+                    "Relative Sweep (0–100 %) — All Tests "
+                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
+                ),
                 content=fig,
                 description=_build_section_description(
                     "What you are seeing: each test is normalized to its own 0–100% range so only the profile shape remains.",
@@ -1339,12 +1483,18 @@ def _add_comparison_section(
         for name, binned in display_binned.items():
             fig = plot_sweep_binned(
                 binned,
-                title=f"{name} — Binned Mean",
+                title=(
+                    f"{name} — Binned Mean "
+                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
+                ),
                 show_error_bars=defn.show_error_bars,
             )
             sections.append(ReportSection(
                 kind="plot",
-                title=f"{name} — Binned Mean",
+                title=(
+                    f"{name} — Binned Mean "
+                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
+                ),
                 content=fig,
                 description=_build_section_description(
                     "What you are seeing: the overall mean flow-frequency curve for this single test after binning.",
@@ -1429,11 +1579,18 @@ def _add_comparison_section(
             fig, avg_df = ap.plot_global_average(
                 display_binned,
                 bin_hz=defn.bin_hz,
+                title=(
+                    "Global Average Across Tests "
+                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco, use_average_bin=True)})"
+                ),
                 show_error_bars=defn.show_error_bars,
             )
             sections.append(ReportSection(
                 kind="plot",
-                title="Global Average Across Tests",
+                title=(
+                    "Global Average Across Tests "
+                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco, use_average_bin=True)})"
+                ),
                 content=fig,
                 description=_build_section_description(
                     "What you are seeing: a single mean response computed across all selected tests.",
