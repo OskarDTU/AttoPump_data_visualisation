@@ -32,17 +32,22 @@ from .data_processor import (
     parse_sweep_spec_from_name,
     prepare_sweep_data,
     prepare_time_series_data,
+    test_metadata_storage_signature,
+    user_patterns_storage_signature,
 )
+from .experiment_log import experiment_log_storage_signature
 from .io_local import (
     list_run_dirs,
     normalize_root,
     pick_best_csv,
     read_csv_full,
 )
+from .test_configs import config_storage_signature
 from .app_settings import (
     clean_data_folder_path,
     load_settings,
     save_settings,
+    shared_settings_storage_signature,
 )
 
 
@@ -56,6 +61,207 @@ def load_csv_cached(csv_path_str: str) -> pd.DataFrame:
     return read_csv_full(csv_path_str)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def pick_best_csv_path_cached(run_dir_str: str) -> str:
+    """Resolve the preferred CSV path for one run folder with caching."""
+    return str(pick_best_csv(run_dir_str).csv_path)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def filter_run_names_with_local_csv_cached(
+    root_str: str,
+    run_names: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split run names into locally available vs skipped CSV-backed tests."""
+    root = normalize_root(root_str)
+    selectable: list[str] = []
+    skipped: list[str] = []
+
+    for run_name in run_names:
+        try:
+            pick_best_csv(root / run_name)
+        except Exception:
+            skipped.append(run_name)
+            continue
+        selectable.append(run_name)
+
+    return tuple(selectable), tuple(skipped)
+
+
+@dataclass
+class PreparedTestData:
+    """Prepared, reusable per-test data derived from one CSV."""
+
+    time_series_data: pd.DataFrame
+    signal_col: str
+    test_type: str
+    sweep_data: pd.DataFrame | None = None
+    const_data: pd.DataFrame | None = None
+    const_freq: float | None = None
+
+
+def _file_signature(path: Path) -> tuple[str, int, int]:
+    """Return a cheap file signature for Streamlit cache invalidation."""
+    if not path.exists():
+        return (str(path), 0, 0)
+    stat = path.stat()
+    return (str(path), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _build_test_cache_context(run_name: str, run_dir: str | Path) -> dict[str, Any]:
+    """Collect the cache keys needed for one prepared test payload."""
+    resolved_run_dir = Path(run_dir)
+    csv_path = Path(pick_best_csv_path_cached(str(resolved_run_dir)))
+    data_root = resolved_run_dir.parent
+    return {
+        "run_name": run_name,
+        "run_dir_str": str(resolved_run_dir),
+        "data_root_str": str(data_root),
+        "csv_path_str": str(csv_path),
+        "csv_signature": _file_signature(csv_path),
+        "metadata_signature": test_metadata_storage_signature(),
+        "user_patterns_signature": user_patterns_storage_signature(),
+        "test_config_signature": config_storage_signature(),
+        "experiment_log_signature": experiment_log_storage_signature(data_root),
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _prepare_test_data_cached(
+    run_name: str,
+    run_dir_str: str,
+    data_root_str: str,
+    csv_path_str: str,
+    csv_signature: tuple[str, int, int],
+    metadata_signature: tuple[str, int, int],
+    user_patterns_signature: tuple[str, int, int],
+    test_config_signature: tuple[str, int, int],
+    experiment_log_signature: tuple[str, int, int],
+) -> PreparedTestData:
+    """Load and preprocess one test into reusable time/sweep/constant frames."""
+    del run_dir_str
+    del csv_signature
+    del metadata_signature
+    del user_patterns_signature
+    del test_config_signature
+    del experiment_log_signature
+
+    df = load_csv_cached(csv_path_str)
+    if df.empty:
+        raise ValueError("empty CSV")
+
+    time_col = guess_time_column(df)
+    signal_col = guess_signal_column(df, "flow")
+    if not time_col or not signal_col:
+        raise ValueError("cannot detect columns")
+
+    time_format = detect_time_format(df, time_col)
+    should_parse_time = time_format == "absolute_timestamp"
+    ts_df = prepare_time_series_data(
+        df,
+        time_col,
+        signal_col,
+        parse_time=should_parse_time,
+        time_format=time_format,
+    )
+
+    test_type, _, _ = detect_test_type(run_name, df, data_root=data_root_str)
+    has_freq = "freq_set_hz" in df.columns
+    unique_freqs = (
+        int(df["freq_set_hz"].dropna().nunique())
+        if has_freq
+        else 0
+    )
+    is_sweep = test_type == "sweep" or unique_freqs > 1
+
+    if is_sweep:
+        spec = parse_sweep_spec_from_name(run_name)
+        if has_freq or (spec and spec.duration_s > 0):
+            sweep_df = prepare_sweep_data(
+                ts_df,
+                time_col,
+                signal_col,
+                spec=spec,
+                parse_time=should_parse_time,
+                full_df=df if has_freq else None,
+                time_format=time_format,
+            )
+            return PreparedTestData(
+                time_series_data=ts_df,
+                signal_col=signal_col,
+                test_type=test_type,
+                sweep_data=sweep_df,
+            )
+
+    const_freq = detect_constant_frequency(df, run_name, data_root=data_root_str)
+    return PreparedTestData(
+        time_series_data=ts_df,
+        signal_col=signal_col,
+        test_type=test_type,
+        const_data=ts_df,
+        const_freq=const_freq,
+    )
+
+
+def load_prepared_test_data(run_name: str, run_dir: str | Path) -> PreparedTestData:
+    """Return cached preprocessed data for one test folder."""
+    context = _build_test_cache_context(run_name, run_dir)
+    return _prepare_test_data_cached(**context)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _bin_prepared_test_cached(
+    run_name: str,
+    run_dir_str: str,
+    data_root_str: str,
+    csv_path_str: str,
+    csv_signature: tuple[str, int, int],
+    metadata_signature: tuple[str, int, int],
+    user_patterns_signature: tuple[str, int, int],
+    test_config_signature: tuple[str, int, int],
+    experiment_log_signature: tuple[str, int, int],
+    bin_hz: float,
+) -> pd.DataFrame:
+    """Return cached binned sweep data for one test and bin width."""
+    prepared = _prepare_test_data_cached(
+        run_name=run_name,
+        run_dir_str=run_dir_str,
+        data_root_str=data_root_str,
+        csv_path_str=csv_path_str,
+        csv_signature=csv_signature,
+        metadata_signature=metadata_signature,
+        user_patterns_signature=user_patterns_signature,
+        test_config_signature=test_config_signature,
+        experiment_log_signature=experiment_log_signature,
+    )
+    if prepared.sweep_data is None:
+        return pd.DataFrame()
+
+    return bin_by_frequency(
+        prepared.sweep_data,
+        value_col=prepared.signal_col,
+        freq_col="Frequency",
+        bin_hz=bin_hz,
+    )
+
+
+def load_binned_test_data(
+    run_name: str,
+    run_dir: str | Path,
+    *,
+    bin_hz: float,
+) -> pd.DataFrame | None:
+    """Return cached binned sweep data for one test folder."""
+    context = _build_test_cache_context(run_name, run_dir)
+    binned = _bin_prepared_test_cached(
+        **context,
+        bin_hz=float(bin_hz),
+    )
+    if binned.empty:
+        return None
+    return binned
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # SIDEBAR DATA-PATH WIDGET (single definition)
 # ══════════════════════════════════════════════════════════════════════════
@@ -64,6 +270,7 @@ _DATA_PATH_WIDGET_KEY = "data_path"
 _DATA_PATH_SELECT_KEY = "data_path_saved_selection"
 _DATA_PATH_NAME_KEY = "data_path_save_name"
 _DATA_PATH_STATUS_KEY = "_data_path_status"
+_DATA_PATH_SETTINGS_SIG_KEY = "_data_path_settings_signature"
 _MANUAL_PATH_OPTION = "(Current session path)"
 
 
@@ -82,6 +289,7 @@ def _find_saved_name_for_path(path: str, saved_paths: dict[str, str]) -> str:
 
 def _ensure_data_source_state() -> None:
     """Bootstrap shared session state for the current data source."""
+    current_sig = shared_settings_storage_signature()
     settings = load_settings()
     saved_paths = settings.saved_data_paths
     current_path = clean_data_folder_path(settings.data_folder_path)
@@ -90,21 +298,25 @@ def _ensure_data_source_state() -> None:
     if selected_name in saved_paths:
         current_path = saved_paths[selected_name]
 
-    if _DATA_PATH_WIDGET_KEY not in st.session_state:
-        st.session_state[_DATA_PATH_WIDGET_KEY] = current_path
+    should_refresh = (
+        st.session_state.get(_DATA_PATH_SETTINGS_SIG_KEY) != current_sig
+        or _DATA_PATH_WIDGET_KEY not in st.session_state
+        or _DATA_PATH_SELECT_KEY not in st.session_state
+        or _DATA_PATH_NAME_KEY not in st.session_state
+    )
 
-    if _DATA_PATH_SELECT_KEY not in st.session_state:
+    if should_refresh:
+        st.session_state[_DATA_PATH_WIDGET_KEY] = current_path
         if selected_name in saved_paths:
             st.session_state[_DATA_PATH_SELECT_KEY] = selected_name
         else:
             matched_name = _find_saved_name_for_path(current_path, saved_paths)
             st.session_state[_DATA_PATH_SELECT_KEY] = matched_name or _MANUAL_PATH_OPTION
-
-    if _DATA_PATH_NAME_KEY not in st.session_state:
         selected = st.session_state.get(_DATA_PATH_SELECT_KEY, _MANUAL_PATH_OPTION)
         st.session_state[_DATA_PATH_NAME_KEY] = (
             selected if selected in saved_paths else ""
         )
+        st.session_state[_DATA_PATH_SETTINGS_SIG_KEY] = current_sig
 
 
 def _persist_settings_for_current_path() -> None:
@@ -126,6 +338,7 @@ def _persist_settings_for_current_path() -> None:
 
     settings.data_folder_path = current_path
     save_settings(settings)
+    st.session_state[_DATA_PATH_SETTINGS_SIG_KEY] = shared_settings_storage_signature()
 
 
 def _persist_data_path(widget_key: str) -> None:
@@ -152,6 +365,7 @@ def _on_saved_path_selection_change() -> None:
         settings.selected_data_path_name = ""
 
     save_settings(settings)
+    st.session_state[_DATA_PATH_SETTINGS_SIG_KEY] = shared_settings_storage_signature()
 
 
 def _save_current_path_as_named_source() -> tuple[str, str]:
@@ -177,6 +391,7 @@ def _save_current_path_as_named_source() -> tuple[str, str]:
     st.session_state[_DATA_PATH_SELECT_KEY] = name
     st.session_state[_DATA_PATH_NAME_KEY] = name
     st.session_state[_DATA_PATH_WIDGET_KEY] = path
+    st.session_state[_DATA_PATH_SETTINGS_SIG_KEY] = shared_settings_storage_signature()
     return "success", f"Saved data source '{name}'."
 
 
@@ -197,6 +412,7 @@ def _delete_selected_named_source() -> tuple[str, str]:
     st.session_state[_DATA_PATH_SELECT_KEY] = _MANUAL_PATH_OPTION
     if st.session_state.get(_DATA_PATH_NAME_KEY) == selected:
         st.session_state[_DATA_PATH_NAME_KEY] = ""
+    st.session_state[_DATA_PATH_SETTINGS_SIG_KEY] = shared_settings_storage_signature()
     return "success", f"Deleted saved data source '{selected}'."
 
 
@@ -385,70 +601,35 @@ def load_and_classify_tests(
             continue
 
         try:
-            pick = pick_best_csv(run_dir)
-            df = load_csv_cached(str(pick.csv_path))
-            if df.empty:
-                result.errors.append(f"{name}: empty CSV")
-                continue
+            prepared = load_prepared_test_data(name, run_dir)
+            if result.signal_col == "flow" and prepared.signal_col:
+                result.signal_col = prepared.signal_col
 
-            time_col = guess_time_column(df)
-            sig_col = guess_signal_column(df, "flow")
-            if not time_col or not sig_col:
-                result.errors.append(f"{name}: cannot detect columns")
-                continue
+            result.all_data[name] = prepared.time_series_data
+            result.test_types[name] = prepared.test_type
 
-            if result.signal_col == "flow" and sig_col:
-                result.signal_col = sig_col
-
-            time_fmt = detect_time_format(df, time_col)
-            ts_df = prepare_time_series_data(
-                df, time_col, sig_col,
-                parse_time=(time_fmt == "absolute_timestamp"),
-            )
-            result.all_data[name] = ts_df
-
-            # Classify test type
-            ttype, _, _ = detect_test_type(name, df, data_root=run_dir.parent)
-            result.test_types[name] = ttype
-            has_freq = "freq_set_hz" in df.columns
-
-            if ttype == "sweep" or (has_freq and df["freq_set_hz"].dropna().nunique() > 1):
-                # ── Sweep path ──
-                spec = parse_sweep_spec_from_name(name)
-                if has_freq or (spec and spec.duration_s > 0):
-                    sweep_df = prepare_sweep_data(
-                        ts_df, time_col, sig_col,
-                        spec=spec,
-                        parse_time=(time_fmt == "absolute_timestamp"),
-                        full_df=df if has_freq else None,
+            if prepared.sweep_data is not None:
+                sweep_df = prepared.sweep_data
+                if max_raw_points and len(sweep_df) > max_raw_points:
+                    result.sweep_data[name] = sweep_df.sample(
+                        n=max_raw_points,
+                        random_state=42,
                     )
-                    if max_raw_points and len(sweep_df) > max_raw_points:
-                        result.sweep_data[name] = sweep_df.sample(
-                            n=max_raw_points, random_state=42,
-                        )
-                    else:
-                        result.sweep_data[name] = sweep_df
-
-                    try:
-                        binned = bin_by_frequency(
-                            sweep_df, value_col=sig_col,
-                            freq_col="Frequency", bin_hz=bin_hz,
-                        )
-                        result.binned_data[name] = binned
-                    except Exception as be:
-                        result.errors.append(f"{name}: binning — {be}")
                 else:
-                    # Has sweep name but no frequency data → treat as constant
-                    result.const_data[name] = ts_df
-                    cf = detect_constant_frequency(df, name, data_root=run_dir.parent)
-                    if cf:
-                        result.const_freqs[name] = cf
-            else:
-                # ── Constant frequency path ──
-                result.const_data[name] = ts_df
-                cf = detect_constant_frequency(df, name, data_root=run_dir.parent)
-                if cf:
-                    result.const_freqs[name] = cf
+                    result.sweep_data[name] = sweep_df
+
+                try:
+                    binned = load_binned_test_data(name, run_dir, bin_hz=bin_hz)
+                    if binned is not None:
+                        result.binned_data[name] = binned
+                except Exception as be:
+                    result.errors.append(f"{name}: binning — {be}")
+
+            if prepared.const_data is not None:
+                result.const_data[name] = prepared.const_data
+
+            if prepared.const_freq is not None:
+                result.const_freqs[name] = prepared.const_freq
 
         except Exception as e:
             result.errors.append(f"{name}: {e}")

@@ -30,23 +30,17 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from ..data.io_local import pick_best_csv
 from ..data.config import PLOT_BIN_WIDTH_HZ, PLOT_HEIGHT
 from ..data.data_processor import (
-    bin_by_frequency,
-    detect_constant_frequency,
-    detect_test_type,
-    detect_time_format,
     explain_frequency_bin_recommendation,
     format_bin_choice_label,
-    guess_signal_column,
-    guess_time_column,
-    parse_sweep_spec_from_name,
-    prepare_sweep_data,
-    prepare_time_series_data,
     recommend_frequency_bin_widths,
 )
-from ..data.loader import load_csv_cached, resolve_data_path
+from ..data.loader import (
+    load_and_classify_tests,
+    load_prepared_test_data,
+    resolve_data_path,
+)
 from ..data.pump_registry import (
     Pump,
     PumpSubGroup,
@@ -61,11 +55,13 @@ from ..data.pump_registry import (
     remove_pump,
     remove_sub_group,
     rename_pump,
+    registry_storage_signature,
     save_registry,
     unlink_test,
     upsert_sub_group,
 )
 from ..reports.generator import (
+    AxisBounds,
     COMPARISON_OPTIONS,
     ReportDefinition,
     ReportSection,
@@ -76,7 +72,7 @@ from ..reports.generator import (
     save_report,
     save_report_definition,
 )
-from ..plot_guidance import render_plot_guide
+from ..plot_guidance import build_plot_guide_text, render_plot_guide
 from .unknown_test_prompt import classify_tests_quick, render_unknown_test_prompt
 
 # Lazy-import heavy plot modules only when needed
@@ -107,14 +103,21 @@ def _get_bar_comparison_plots():
 def _get_registry() -> PumpRegistry:
     """Return the in-memory pump registry (loads from disk on first access)."""
     key = "_pump_registry"
-    if key not in st.session_state:
+    sig_key = "_pump_registry_signature"
+    current_sig = registry_storage_signature()
+    if (
+        key not in st.session_state
+        or st.session_state.get(sig_key) != current_sig
+    ):
         st.session_state[key] = migrate_legacy_files()
+        st.session_state[sig_key] = registry_storage_signature()
     return st.session_state[key]
 
 
 def _persist_registry() -> None:
     """Flush the registry to disk."""
     save_registry(_get_registry())
+    st.session_state["_pump_registry_signature"] = registry_storage_signature()
 
 
 _SELECTION_MODE_OPTIONS = {
@@ -129,6 +132,19 @@ _DEFAULT_REPORT_COMPARISONS = [
     "boxplots",
     "constant_time_series",
 ]
+
+
+def _format_optional_numeric(value: float | None) -> str:
+    """Render an optional numeric setting as a text-input value."""
+    if value is None:
+        return ""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(numeric):
+        return ""
+    return f"{numeric:g}"
 
 
 def _encode_sub_group_entry_id(pump_name: str, group_name: str) -> str:
@@ -204,8 +220,16 @@ def _template_widget_defaults(
     loaded_defn: ReportDefinition | None,
 ) -> dict[str, object]:
     """Build the widget-state defaults for a loaded report template."""
-    if loaded_defn is None:
+    def _axis_defaults(prefix: str, axis: AxisBounds) -> dict[str, str]:
         return {
+            f"{prefix}_xmin": _format_optional_numeric(axis.x_min),
+            f"{prefix}_xmax": _format_optional_numeric(axis.x_max),
+            f"{prefix}_ymin": _format_optional_numeric(axis.y_min),
+            f"{prefix}_ymax": _format_optional_numeric(axis.y_max),
+        }
+
+    if loaded_defn is None:
+        defaults = {
             "rb_title": _DEFAULT_REPORT_TITLE,
             "rb_author": "",
             "rb_notes": "",
@@ -213,18 +237,30 @@ def _template_widget_defaults(
             "rb_entries_pumps": [],
             "rb_entries_sub_groups": [],
             "rb_comparisons": list(_DEFAULT_REPORT_COMPARISONS),
-            "rb_bin": 5.0,
+            "rb_plot_bin": 5.0,
+            "rb_avg_bin": 3.0,
             "rb_err": True,
             "rb_indiv": False,
             "rb_raw_all_sweeps": True,
+            "rb_mode": "lines+markers",
+            "rb_marker_size": 6,
+            "rb_opacity": 0.8,
+            "rb_maxpts": 50_000,
+            "rb_best_mean": 75,
+            "rb_best_std": 10,
         }
+        defaults.update(_axis_defaults("rb_sweep_axis", AxisBounds()))
+        defaults.update(_axis_defaults("rb_relative_axis", AxisBounds()))
+        defaults.update(_axis_defaults("rb_time_axis", AxisBounds()))
+        defaults.update(_axis_defaults("rb_variability_axis", AxisBounds()))
+        return defaults
 
     selection_mode = (
         loaded_defn.selection_mode
         if loaded_defn.selection_mode in _SELECTION_MODE_OPTIONS
         else "pumps"
     )
-    return {
+    defaults = {
         "rb_title": loaded_defn.title,
         "rb_author": loaded_defn.author,
         "rb_notes": loaded_defn.notes,
@@ -236,11 +272,23 @@ def _template_widget_defaults(
         "rb_comparisons": [
             comp for comp in loaded_defn.comparisons if comp in COMPARISON_OPTIONS
         ] or list(_DEFAULT_REPORT_COMPARISONS),
-        "rb_bin": float(loaded_defn.bin_hz),
+        "rb_plot_bin": float(loaded_defn.bin_hz),
+        "rb_avg_bin": float(loaded_defn.avg_bin_hz),
         "rb_err": bool(loaded_defn.show_error_bars),
         "rb_indiv": bool(loaded_defn.show_individual_tests),
         "rb_raw_all_sweeps": bool(loaded_defn.show_raw_all_sweeps),
+        "rb_mode": loaded_defn.plot_mode,
+        "rb_marker_size": int(loaded_defn.marker_size),
+        "rb_opacity": float(loaded_defn.opacity),
+        "rb_maxpts": int(loaded_defn.max_raw_points),
+        "rb_best_mean": int(loaded_defn.mean_threshold_pct),
+        "rb_best_std": int(loaded_defn.std_threshold_pct),
     }
+    defaults.update(_axis_defaults("rb_sweep_axis", loaded_defn.sweep_axis))
+    defaults.update(_axis_defaults("rb_relative_axis", loaded_defn.relative_axis))
+    defaults.update(_axis_defaults("rb_time_axis", loaded_defn.time_axis))
+    defaults.update(_axis_defaults("rb_variability_axis", loaded_defn.variability_axis))
+    return defaults
 
 
 def _apply_template_to_session_state(
@@ -269,52 +317,49 @@ def _recommend_report_bin_cached(
     if not folder_names:
         return None
 
+    run_map = {name: run_dir for name, run_dir in zip(run_names, run_dir_strs)}
     sweep_frames: list[pd.DataFrame] = []
+    signal_col = "flow"
+
     for name in folder_names:
-        if name not in run_names:
+        run_dir_str = run_map.get(name)
+        if run_dir_str is None:
             continue
-        idx = run_names.index(name)
-        run_dir = Path(run_dir_strs[idx])
-        pick = pick_best_csv(run_dir)
-        df = load_csv_cached(str(pick.csv_path))
-        if df.empty:
+        try:
+            prepared = load_prepared_test_data(name, run_dir_str)
+        except Exception:
             continue
-
-        time_col = guess_time_column(df)
-        sig_col = guess_signal_column(df, "flow")
-        if not time_col or not sig_col:
+        if prepared.sweep_data is None:
             continue
-
-        time_fmt = detect_time_format(df, time_col)
-        ts_df = prepare_time_series_data(
-            df,
-            time_col,
-            sig_col,
-            parse_time=(time_fmt == "absolute_timestamp"),
-        )
-        ttype, _, _ = detect_test_type(name, df, data_root=run_dir.parent)
-        has_freq = "freq_set_hz" in df.columns
-        spec = parse_sweep_spec_from_name(name)
-        is_sweep = ttype == "sweep" or (
-            has_freq and df["freq_set_hz"].dropna().nunique() > 1
-        )
-        if not is_sweep or (not has_freq and not (spec and spec.duration_s > 0)):
-            continue
-
-        sweep_frames.append(
-            prepare_sweep_data(
-                ts_df,
-                time_col,
-                sig_col,
-                spec=spec,
-                parse_time=(time_fmt == "absolute_timestamp"),
-                full_df=df if has_freq else None,
-            )
-        )
+        signal_col = prepared.signal_col
+        sweep_frames.append(prepared.sweep_data)
 
     if not sweep_frames:
         return None
-    return recommend_frequency_bin_widths(sweep_frames)
+    recommendation = recommend_frequency_bin_widths(
+        sweep_frames,
+        value_col=signal_col,
+    )
+    if (
+        int(recommendation.get("test_series_count", 0)) < 2
+        and int(recommendation.get("average_series_count", 0)) < 2
+    ):
+        return None
+    return recommendation
+
+
+def _reset_report_bin() -> None:
+    """Reset the report smoothing bin to the current recommendation."""
+    recommendation = st.session_state.get("_rb_bin_recommendation")
+    if recommendation and int(recommendation.get("average_series_count", 0)) >= 2:
+        st.session_state["rb_avg_bin"] = float(recommendation["average_bin_hz"])
+
+
+def _reset_report_plot_bin() -> None:
+    """Reset the report per-test bin to the current recommendation."""
+    recommendation = st.session_state.get("_rb_bin_recommendation")
+    if recommendation and int(recommendation.get("test_series_count", 0)) >= 2:
+        st.session_state["rb_plot_bin"] = float(recommendation["test_bin_hz"])
 
 
 def _build_report_target_options(
@@ -443,6 +488,11 @@ def _build_section_description(*parts: str) -> str:
     return "\n\n".join(part.strip() for part in parts if part and part.strip())
 
 
+def _build_guided_section_description(plot_id: str, *parts: str) -> str:
+    """Join the shared plot explanation with report-specific context."""
+    return _build_section_description(build_plot_guide_text(plot_id), *parts)
+
+
 def _format_flat_test_listing(test_names: list[str]) -> str:
     """Render a compact list of included test names."""
     if not test_names:
@@ -486,18 +536,185 @@ def _build_time_effect_summary(df: pd.DataFrame, signal_col: str) -> str:
     return analysis["summary"]
 
 
+def _parse_optional_float(
+    raw_value: object,
+    *,
+    label: str,
+    errors: list[str],
+) -> float | None:
+    """Parse an optional float from a text input."""
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        errors.append(f"{label} must be a number or blank.")
+        return None
+
+
+def _read_axis_bounds_from_state(
+    prefix: str,
+    *,
+    label: str,
+    errors: list[str],
+) -> AxisBounds:
+    """Build one axis-bound set from Streamlit text-input state."""
+    axis = AxisBounds(
+        x_min=_parse_optional_float(
+            st.session_state.get(f"{prefix}_xmin", ""),
+            label=f"{label} x-min",
+            errors=errors,
+        ),
+        x_max=_parse_optional_float(
+            st.session_state.get(f"{prefix}_xmax", ""),
+            label=f"{label} x-max",
+            errors=errors,
+        ),
+        y_min=_parse_optional_float(
+            st.session_state.get(f"{prefix}_ymin", ""),
+            label=f"{label} y-min",
+            errors=errors,
+        ),
+        y_max=_parse_optional_float(
+            st.session_state.get(f"{prefix}_ymax", ""),
+            label=f"{label} y-max",
+            errors=errors,
+        ),
+    )
+    if (
+        axis.x_min is not None
+        and axis.x_max is not None
+        and axis.x_min >= axis.x_max
+    ):
+        errors.append(f"{label} x-min must be smaller than x-max.")
+    if (
+        axis.y_min is not None
+        and axis.y_max is not None
+        and axis.y_min >= axis.y_max
+    ):
+        errors.append(f"{label} y-min must be smaller than y-max.")
+    return axis
+
+
+def _render_axis_inputs(
+    title: str,
+    *,
+    prefix: str,
+    x_label: str,
+    y_label: str,
+) -> None:
+    """Render four optional manual axis-limit inputs."""
+    st.markdown(f"**{title}**")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.text_input(
+            f"{x_label} min",
+            key=f"{prefix}_xmin",
+            placeholder="auto",
+        )
+    with c2:
+        st.text_input(
+            f"{x_label} max",
+            key=f"{prefix}_xmax",
+            placeholder="auto",
+        )
+    with c3:
+        st.text_input(
+            f"{y_label} min",
+            key=f"{prefix}_ymin",
+            placeholder="auto",
+        )
+    with c4:
+        st.text_input(
+            f"{y_label} max",
+            key=f"{prefix}_ymax",
+            placeholder="auto",
+        )
+
+
+def _axis_bounds_text(
+    axis_bounds: AxisBounds,
+    *,
+    x_name: str = "x",
+    y_name: str = "y",
+) -> str:
+    """Summarize manual axis bounds for section descriptions."""
+    if (
+        axis_bounds.x_min is None
+        and axis_bounds.x_max is None
+        and axis_bounds.y_min is None
+        and axis_bounds.y_max is None
+    ):
+        return "axis limits = auto"
+
+    parts: list[str] = []
+    if axis_bounds.x_min is not None or axis_bounds.x_max is not None:
+        parts.append(
+            f"{x_name} range = "
+            f"{_format_optional_numeric(axis_bounds.x_min) or 'auto'} to "
+            f"{_format_optional_numeric(axis_bounds.x_max) or 'auto'}"
+        )
+    if axis_bounds.y_min is not None or axis_bounds.y_max is not None:
+        parts.append(
+            f"{y_name} range = "
+            f"{_format_optional_numeric(axis_bounds.y_min) or 'auto'} to "
+            f"{_format_optional_numeric(axis_bounds.y_max) or 'auto'}"
+        )
+    return "; ".join(parts)
+
+
+def _apply_axis_bounds(fig, axis_bounds: AxisBounds) -> None:
+    """Apply optional manual axis limits to a Plotly figure in-place."""
+    if axis_bounds.x_min is not None or axis_bounds.x_max is not None:
+        fig.update_xaxes(range=[axis_bounds.x_min, axis_bounds.x_max])
+    if axis_bounds.y_min is not None or axis_bounds.y_max is not None:
+        fig.update_yaxes(range=[axis_bounds.y_min, axis_bounds.y_max])
+
+
+def _format_render_context(
+    defn: ReportDefinition,
+    *,
+    axis_bounds: AxisBounds | None = None,
+    x_name: str = "x",
+    y_name: str = "y",
+    include_opacity: bool = True,
+) -> str:
+    """Summarize shared rendering settings for report figures."""
+    mode_label = {
+        "lines": "lines",
+        "markers": "markers",
+        "lines+markers": "lines + markers",
+    }.get(defn.plot_mode, defn.plot_mode)
+    parts = [
+        f"plot mode = {mode_label}",
+        f"marker size = {int(defn.marker_size)} px",
+    ]
+    if include_opacity:
+        parts.append(f"opacity = {float(defn.opacity):.2f}")
+    if axis_bounds is not None:
+        parts.append(_axis_bounds_text(axis_bounds, x_name=x_name, y_name=y_name))
+    return "Render settings: " + "; ".join(parts) + "."
+
+
 def _format_sweep_plot_context(
     defn: ReportDefinition,
     *,
+    use_average_bin: bool = False,
     include_individual_tests: bool | None = None,
     raw_layer_enabled: bool | None = None,
+    axis_bounds: AxisBounds | None = None,
 ) -> str:
     """Summarize the key report settings that govern a sweep-based figure."""
-    parts = [f"frequency bin width = {defn.bin_hz:g} Hz"]
+    parts = [f"per-test frequency bin width = {defn.bin_hz:g} Hz"]
+    if use_average_bin:
+        parts.append(
+            f"cross-test / cross-target averaging bin width = {defn.avg_bin_hz:g} Hz"
+        )
     parts.append(
-        "±1 standard deviation bands shown"
+        "±1 standard deviation error bars shown"
         if defn.show_error_bars
-        else "±1 standard deviation bands hidden"
+        else "±1 standard deviation error bars hidden"
     )
     if include_individual_tests is not None:
         parts.append(
@@ -511,6 +728,56 @@ def _format_sweep_plot_context(
             if raw_layer_enabled
             else "raw all-sweeps layer omitted"
         )
+    if axis_bounds is not None:
+        parts.append(
+            _axis_bounds_text(
+                axis_bounds,
+                x_name="frequency",
+                y_name="flow",
+            )
+        )
+    return "Plot context: " + "; ".join(parts) + "."
+
+
+def _format_raw_sweep_context(
+    defn: ReportDefinition,
+    *,
+    axis_bounds: AxisBounds,
+    max_raw_points: int | None = None,
+    average_overlay_bin_hz: float | None = None,
+) -> str:
+    """Describe raw sweep-point render settings accurately."""
+    parts = ["raw sweep points shown without frequency binning"]
+    if max_raw_points is not None:
+        parts.append(f"per-test point cap = {int(max_raw_points):,}")
+    if average_overlay_bin_hz is not None:
+        parts.append(
+            f"black average overlay uses {float(average_overlay_bin_hz):g} Hz bins"
+        )
+    parts.append(
+        _axis_bounds_text(axis_bounds, x_name="frequency", y_name="flow")
+    )
+    return "Plot context: " + "; ".join(parts) + "."
+
+
+def _format_variability_context(
+    defn: ReportDefinition,
+    *,
+    axis_bounds: AxisBounds,
+    include_thresholds: bool = False,
+) -> str:
+    """Describe mean-vs-std plot settings."""
+    parts = []
+    if include_thresholds:
+        parts.append(
+            f"high-flow filter keeps the top {int(defn.mean_threshold_pct)}% by mean"
+        )
+        parts.append(
+            f"stability filter keeps the lowest {int(defn.std_threshold_pct)}% by std within that subset"
+        )
+    parts.append(
+        _axis_bounds_text(axis_bounds, x_name="mean flow", y_name="std")
+    )
     return "Plot context: " + "; ".join(parts) + "."
 
 
@@ -1024,7 +1291,10 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
                 tuple(str(path) for path in run_dirs),
             )
             if recommendation:
-                st.session_state["rb_bin"] = recommendation["average_bin_hz"]
+                if int(recommendation.get("test_series_count", 0)) >= 2:
+                    st.session_state["rb_plot_bin"] = recommendation["test_bin_hz"]
+                if int(recommendation.get("average_series_count", 0)) >= 2:
+                    st.session_state["rb_avg_bin"] = recommendation["average_bin_hz"]
                 st.session_state["_rb_bin_signature"] = bin_signature
                 st.session_state["_rb_bin_recommendation"] = recommendation
             else:
@@ -1060,15 +1330,23 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
 
     # ── Plot settings ───────────────────────────────────────────
     with st.expander("⚙️ Plot settings", expanded=False):
-        bin_hz = st.slider(
-            "Frequency bin width (Hz)",
+        plot_bin_hz = st.slider(
+            "Per-test frequency bin width (Hz)",
             0.5,
             100.0,
-            value=float(st.session_state.get("rb_bin", 5.0)),
+            value=float(st.session_state.get("rb_plot_bin", 5.0)),
             step=0.5,
-            key="rb_bin",
+            key="rb_plot_bin",
         )
-        show_err = st.checkbox("Show ±1 std bands", key="rb_err")
+        avg_bin_hz = st.slider(
+            "Cross-test averaging bin width (Hz)",
+            0.5,
+            100.0,
+            value=float(st.session_state.get("rb_avg_bin", 3.0)),
+            step=0.5,
+            key="rb_avg_bin",
+        )
+        show_err = st.checkbox("Show ±1 std error bars", key="rb_err")
         show_indiv = st.checkbox(
             "Show individual test lines behind averages",
             key="rb_indiv",
@@ -1077,15 +1355,155 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
             "Include raw all-sweeps layer for individual sweep diagnostics",
             key="rb_raw_all_sweeps",
         )
+        plot_mode = st.selectbox(
+            "Curve style",
+            ["lines+markers", "lines", "markers"],
+            key="rb_mode",
+        )
+        marker_size = st.slider(
+            "Marker size (px)",
+            1,
+            20,
+            int(st.session_state.get("rb_marker_size", 6)),
+            key="rb_marker_size",
+        )
+        opacity = st.slider(
+            "Raw trace opacity",
+            0.1,
+            1.0,
+            float(st.session_state.get("rb_opacity", 0.8)),
+            0.05,
+            key="rb_opacity",
+        )
+        max_raw_points = st.slider(
+            "Max raw points per test",
+            1000,
+            500000,
+            int(st.session_state.get("rb_maxpts", 50000)),
+            1000,
+            key="rb_maxpts",
+        )
+        best_mean_pct = st.slider(
+            "Best-region high-flow %",
+            50,
+            99,
+            int(st.session_state.get("rb_best_mean", 75)),
+            key="rb_best_mean",
+            help="Keeps the top X% of bins by mean flow before the stability filter is applied.",
+        )
+        best_std_pct = st.slider(
+            "Best-region stability %",
+            1,
+            50,
+            int(st.session_state.get("rb_best_std", 10)),
+            key="rb_best_std",
+            help="Within the high-flow subset, keeps the lowest X% by standard deviation.",
+        )
         bin_reco = st.session_state.get("_rb_bin_recommendation")
-        if load_choice == "(new report)" and bin_reco:
+        if load_choice == "(new report)" and bin_reco and int(bin_reco.get("test_series_count", 0)) >= 2:
             st.caption(
-                "Recommended smoothing bin for current selection: "
+                "Recommended per-test plot bin: "
+                + explain_frequency_bin_recommendation(
+                    bin_reco,
+                    include_average_bin=False,
+                )
+            )
+            st.button(
+                "Reset plot bin to recommended",
+                key="rb_reset_plot_bin",
+                on_click=_reset_report_plot_bin,
+            )
+        if load_choice == "(new report)" and bin_reco and int(bin_reco.get("average_series_count", 0)) >= 2:
+            st.caption(
+                "Recommended averaging bin: "
                 + explain_frequency_bin_recommendation(bin_reco)
             )
-            if st.button("Reset bin to recommended", key="rb_reset_bin"):
-                st.session_state["rb_bin"] = bin_reco["average_bin_hz"]
-                st.rerun()
+            st.button(
+                "Reset averaging bin to recommended",
+                key="rb_reset_bin",
+                on_click=_reset_report_bin,
+            )
+
+        st.caption("Leave axis-limit fields blank to keep auto-ranging.")
+        sweep_axis_required = bool(
+            set(selected_comparisons)
+            & {"sweep_overlay", "individual_sweeps", "global_average", "raw_points"}
+        )
+        relative_axis_required = "sweep_relative" in selected_comparisons
+        time_axis_required = "constant_time_series" in selected_comparisons
+        variability_axis_required = bool(
+            set(selected_comparisons) & {"std_vs_mean", "best_region"}
+        )
+        if sweep_axis_required:
+            _render_axis_inputs(
+                "Frequency vs Flow axes",
+                prefix="rb_sweep_axis",
+                x_label="Frequency",
+                y_label="Flow",
+            )
+        if relative_axis_required:
+            _render_axis_inputs(
+                "Relative sweep axes",
+                prefix="rb_relative_axis",
+                x_label="Frequency",
+                y_label="Relative flow",
+            )
+        if time_axis_required:
+            _render_axis_inputs(
+                "Time-series axes",
+                prefix="rb_time_axis",
+                x_label="Time",
+                y_label="Flow",
+            )
+        if variability_axis_required:
+            _render_axis_inputs(
+                "Mean-vs-std axes",
+                prefix="rb_variability_axis",
+                x_label="Mean flow",
+                y_label="Std",
+            )
+
+    axis_errors: list[str] = []
+    sweep_axis = (
+        _read_axis_bounds_from_state(
+            "rb_sweep_axis",
+            label="Frequency vs Flow axes",
+            errors=axis_errors,
+        )
+        if sweep_axis_required
+        else AxisBounds()
+    )
+    relative_axis = (
+        _read_axis_bounds_from_state(
+            "rb_relative_axis",
+            label="Relative sweep axes",
+            errors=axis_errors,
+        )
+        if relative_axis_required
+        else AxisBounds()
+    )
+    time_axis = (
+        _read_axis_bounds_from_state(
+            "rb_time_axis",
+            label="Time-series axes",
+            errors=axis_errors,
+        )
+        if time_axis_required
+        else AxisBounds()
+    )
+    variability_axis = (
+        _read_axis_bounds_from_state(
+            "rb_variability_axis",
+            label="Mean-vs-std axes",
+            errors=axis_errors,
+        )
+        if variability_axis_required
+        else AxisBounds()
+    )
+    if axis_errors:
+        for err in axis_errors:
+            st.error(err)
+        return
 
     # ── Build definition ────────────────────────────────────────
     defn = ReportDefinition(
@@ -1094,10 +1512,21 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
         entry_ids=selected_entries,
         comparisons=selected_comparisons,
         notes=notes,
-        bin_hz=bin_hz,
+        bin_hz=plot_bin_hz,
+        avg_bin_hz=avg_bin_hz,
         show_error_bars=show_err,
         show_individual_tests=show_indiv,
         show_raw_all_sweeps=show_raw_all_sweeps,
+        plot_mode=plot_mode,
+        marker_size=marker_size,
+        opacity=opacity,
+        max_raw_points=max_raw_points,
+        mean_threshold_pct=best_mean_pct,
+        std_threshold_pct=best_std_pct,
+        sweep_axis=sweep_axis,
+        relative_axis=relative_axis,
+        time_axis=time_axis,
+        variability_axis=variability_axis,
         selection_mode=selection_mode,
     )
 
@@ -1355,32 +1784,36 @@ def _add_comparison_section(
         if bar_binned:
             fig = bcp.plot_bar_sweep_overlay(
                 bar_binned,
-                bin_hz=defn.bin_hz,
+                bin_hz=defn.avg_bin_hz,
                 show_error_bars=defn.show_error_bars,
                 show_individual=defn.show_individual_tests,
+                mode=defn.plot_mode,
+                marker_size=defn.marker_size,
             )
+            _apply_axis_bounds(fig, defn.sweep_axis)
             fig.update_layout(
                 title=(
                     "Frequency Sweep — Report Target Comparison "
-                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco, use_average_bin=True)})"
+                    f"({format_bin_choice_label(float(defn.avg_bin_hz), bin_reco, use_average_bin=True)})"
                 )
             )
             sections.append(ReportSection(
                 kind="plot",
                 title=(
                     "Frequency Sweep — Report Target Comparison "
-                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco, use_average_bin=True)})"
+                    f"({format_bin_choice_label(float(defn.avg_bin_hz), bin_reco, use_average_bin=True)})"
                 ),
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "sweep_overlay",
                     "What you are seeing: each thick curve is the average frequency-response for one selected report target.",
                     (
-                        f"Method: raw sweep points were grouped into {defn.bin_hz:g} Hz frequency bins inside each test. "
-                        "Those test-level mean curves were then averaged within each selected target. "
+                        f"Method: raw sweep points were first grouped into {defn.bin_hz:g} Hz bins inside each test. "
+                        f"Those test-level mean curves were then aligned and averaged within each selected target on a {defn.avg_bin_hz:g} Hz grid. "
                         + (
-                            "The shaded band shows ±1 standard deviation between tests inside the same target."
+                            "The error bars show ±1 standard deviation between tests inside the same target."
                             if defn.show_error_bars
-                            else "The curves are shown without ±1 standard deviation shading."
+                            else "The curves are shown without ±1 standard deviation error bars."
                         )
                     ),
                     (
@@ -1390,8 +1823,11 @@ def _add_comparison_section(
                     ),
                     _format_sweep_plot_context(
                         defn,
+                        use_average_bin=True,
                         include_individual_tests=defn.show_individual_tests,
+                        axis_bounds=defn.sweep_axis,
                     ),
+                    _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
                     _format_nested_test_listing(bar_binned),
                 ),
             ))
@@ -1399,11 +1835,14 @@ def _add_comparison_section(
             fig = ap.plot_combined_overlay(
                 display_binned,
                 show_error_bars=defn.show_error_bars,
+                mode=defn.plot_mode,
+                marker_size=defn.marker_size,
                 title=(
                     "Frequency Sweep — All Tests Overlay "
                     f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
                 ),
             )
+            _apply_axis_bounds(fig, defn.sweep_axis)
             sections.append(ReportSection(
                 kind="plot",
                 title=(
@@ -1411,7 +1850,8 @@ def _add_comparison_section(
                     f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
                 ),
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "sweep_overlay",
                     "What you are seeing: each curve is one individual test after frequency binning.",
                     (
                         f"Method: raw sweep points were grouped into {defn.bin_hz:g} Hz bins and then plotted directly per test. "
@@ -1421,48 +1861,61 @@ def _add_comparison_section(
                         "Interpretation note: repeating comb-like teeth usually reflect discrete setpoints and sweep hysteresis more than small differences "
                         "in where each sweep happened to begin."
                     ),
-                    _format_sweep_plot_context(defn),
+                    _format_sweep_plot_context(defn, axis_bounds=defn.sweep_axis),
+                    _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
                     _format_flat_test_listing(list(display_binned.keys())),
                 ),
             ))
 
     elif comp == "sweep_relative":
         if bar_binned:
-            fig = bcp.plot_bar_sweep_relative(bar_binned, bin_hz=defn.bin_hz)
+            fig = bcp.plot_bar_sweep_relative(
+                bar_binned,
+                bin_hz=defn.avg_bin_hz,
+                mode=defn.plot_mode,
+                marker_size=defn.marker_size,
+            )
+            _apply_axis_bounds(fig, defn.relative_axis)
             fig.update_layout(
                 title=(
                     "Relative Sweep (0–100 %) — Report Target Comparison "
-                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco, use_average_bin=True)})"
+                    f"({format_bin_choice_label(float(defn.avg_bin_hz), bin_reco, use_average_bin=True)})"
                 )
             )
             sections.append(ReportSection(
                 kind="plot",
                 title=(
                     "Relative Sweep (0–100 %) — Report Target Comparison "
-                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco, use_average_bin=True)})"
+                    f"({format_bin_choice_label(float(defn.avg_bin_hz), bin_reco, use_average_bin=True)})"
                 ),
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "sweep_relative",
                     "What you are seeing: each target’s average sweep has been rescaled so its own minimum becomes 0% and its own maximum becomes 100%.",
                     (
-                        "Method: the same target-level average curves used in the sweep overlay were normalized independently to remove absolute flow level "
+                        f"Method: the same target-level average curves used in the sweep overlay were built on a {defn.avg_bin_hz:g} Hz averaging grid and then normalized independently to remove absolute flow level "
                         "and emphasize shape differences across frequency."
                     ),
                     _format_sweep_plot_context(
                         defn,
+                        use_average_bin=True,
                         include_individual_tests=defn.show_individual_tests,
                     ),
+                    _format_render_context(defn, axis_bounds=defn.relative_axis, x_name="frequency", y_name="relative flow", include_opacity=False),
                     _format_nested_test_listing(bar_binned),
                 ),
             ))
         if len(display_binned) > 1:
             fig = ap.plot_relative_comparison(
                 display_binned,
+                mode=defn.plot_mode,
+                marker_size=defn.marker_size,
                 title=(
                     "Relative Sweep (0–100 %) — All Tests "
                     f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
                 ),
             )
+            _apply_axis_bounds(fig, defn.relative_axis)
             sections.append(ReportSection(
                 kind="plot",
                 title=(
@@ -1470,10 +1923,12 @@ def _add_comparison_section(
                     f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
                 ),
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "sweep_relative",
                     "What you are seeing: each test is normalized to its own 0–100% range so only the profile shape remains.",
                     "Method: per-test binned mean curves are rescaled independently before plotting, so only shape differences remain and absolute flow levels are intentionally removed.",
                     _format_sweep_plot_context(defn),
+                    _format_render_context(defn, axis_bounds=defn.relative_axis, x_name="frequency", y_name="relative flow", include_opacity=False),
                     _format_flat_test_listing(list(display_binned.keys())),
                 ),
             ))
@@ -1487,8 +1942,11 @@ def _add_comparison_section(
                     f"{name} — Binned Mean "
                     f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
                 ),
+                mode=defn.plot_mode,
+                marker_size=defn.marker_size,
                 show_error_bars=defn.show_error_bars,
             )
+            _apply_axis_bounds(fig, defn.sweep_axis)
             sections.append(ReportSection(
                 kind="plot",
                 title=(
@@ -1496,17 +1954,19 @@ def _add_comparison_section(
                     f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
                 ),
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "individual_sweeps",
                     "What you are seeing: the overall mean flow-frequency curve for this single test after binning.",
                     (
                         f"Method: all sweep points from this test were grouped into {defn.bin_hz:g} Hz frequency bins and summarized as mean flow, "
                         + (
-                            "with a ±1 standard deviation band."
+                            "with ±1 standard deviation error bars."
                             if defn.show_error_bars
-                            else "without a ±1 standard deviation band."
+                            else "without ±1 standard deviation error bars."
                         )
                     ),
-                    _format_sweep_plot_context(defn),
+                    _format_sweep_plot_context(defn, axis_bounds=defn.sweep_axis),
+                    _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
                     _format_flat_test_listing([name]),
                 ),
             ))
@@ -1517,12 +1977,16 @@ def _add_comparison_section(
                     signal_col=signal_col,
                     bin_hz=defn.bin_hz,
                     title=f"{name} — Per-Sweep Breakdown",
+                    mode=defn.plot_mode,
+                    marker_size=defn.marker_size,
                 )
+                _apply_axis_bounds(fig_per_sweep, defn.sweep_axis)
                 sections.append(ReportSection(
                     kind="plot",
                     title=f"{name} — Per-Sweep Breakdown",
                     content=fig_per_sweep,
-                    description=_build_section_description(
+                    description=_build_guided_section_description(
+                        "individual_sweeps",
                         "What you are seeing: each line is one sweep cycle from the same test, binned separately.",
                         (
                             f"Method: the raw data were first split by sweep index and then each sweep was binned with width {defn.bin_hz:g} Hz. "
@@ -1532,27 +1996,38 @@ def _add_comparison_section(
                             sweep_df,
                             bin_hz=defn.bin_hz,
                         ),
-                        _format_sweep_plot_context(defn),
+                        _format_sweep_plot_context(defn, axis_bounds=defn.sweep_axis),
+                        _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
                         _format_flat_test_listing([name]),
                     ),
                 ))
 
                 if defn.show_raw_all_sweeps:
                     avg_overlay = _prepare_average_overlay(binned)
+                    raw_sweep_df = (
+                        sweep_df.sample(n=defn.max_raw_points, random_state=42)
+                        if len(sweep_df) > defn.max_raw_points
+                        else sweep_df
+                    )
                     fig_all_sweeps = plot_sweep_all_points(
-                        sweep_df,
+                        raw_sweep_df,
                         x_col="Frequency",
                         y_col=signal_col,
                         color_col="Sweep" if "Sweep" in sweep_df.columns else None,
                         title=f"{name} — Raw All-Sweeps Layer",
+                        mode=defn.plot_mode,
+                        marker_size=defn.marker_size,
+                        opacity=defn.opacity,
                         average_df=avg_overlay if not avg_overlay.empty else None,
                         show_average_error_bars=defn.show_error_bars,
                     )
+                    _apply_axis_bounds(fig_all_sweeps, defn.sweep_axis)
                     sections.append(ReportSection(
                         kind="plot",
                         title=f"{name} — Raw All-Sweeps Layer",
                         content=fig_all_sweeps,
-                        description=_build_section_description(
+                        description=_build_guided_section_description(
+                            "raw_points",
                             "What you are seeing: every raw sweep point is shown, with sweep cycles separated by color and the overall average overlaid in black.",
                             (
                                 "Method: no cross-sweep averaging is applied to the colored traces. This is the best view for checking whether all sweeps are present "
@@ -1566,10 +2041,13 @@ def _add_comparison_section(
                                 "Interpretation note: repeated vertical or comb-like bands usually indicate that different sweep cycles hit similar frequency values "
                                 "with different flow responses. That is more often a sweep-cycle or hysteresis effect than a simple horizontal offset from where each sweep started."
                             ),
-                            _format_sweep_plot_context(
+                            _format_raw_sweep_context(
                                 defn,
-                                raw_layer_enabled=defn.show_raw_all_sweeps,
+                                axis_bounds=defn.sweep_axis,
+                                max_raw_points=defn.max_raw_points,
+                                average_overlay_bin_hz=defn.bin_hz,
                             ),
+                            _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
                             _format_flat_test_listing([name]),
                         ),
                     ))
@@ -1578,31 +2056,36 @@ def _add_comparison_section(
         if len(display_binned) >= 2:
             fig, avg_df = ap.plot_global_average(
                 display_binned,
-                bin_hz=defn.bin_hz,
+                bin_hz=defn.avg_bin_hz,
                 title=(
                     "Global Average Across Tests "
-                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco, use_average_bin=True)})"
+                    f"({format_bin_choice_label(float(defn.avg_bin_hz), bin_reco, use_average_bin=True)})"
                 ),
+                mode=defn.plot_mode,
+                marker_size=defn.marker_size,
                 show_error_bars=defn.show_error_bars,
             )
+            _apply_axis_bounds(fig, defn.sweep_axis)
             sections.append(ReportSection(
                 kind="plot",
                 title=(
                     "Global Average Across Tests "
-                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco, use_average_bin=True)})"
+                    f"({format_bin_choice_label(float(defn.avg_bin_hz), bin_reco, use_average_bin=True)})"
                 ),
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "global_average",
                     "What you are seeing: a single mean response computed across all selected tests.",
                     (
-                        f"Method: each test was aligned onto a common {defn.bin_hz:g} Hz frequency grid and then averaged across tests at each grid point. "
+                        f"Method: each test was first binned at {defn.bin_hz:g} Hz and then aligned onto a common {defn.avg_bin_hz:g} Hz grid for the cross-test average. "
                         + (
-                            "The band shows inter-test ±1 standard deviation."
+                            "The error bars show inter-test ±1 standard deviation."
                             if defn.show_error_bars
-                            else "No inter-test standard-deviation band is shown."
+                            else "No inter-test standard-deviation error bars are shown."
                         )
                     ),
-                    _format_sweep_plot_context(defn),
+                    _format_sweep_plot_context(defn, use_average_bin=True, axis_bounds=defn.sweep_axis),
+                    _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
                     _format_flat_test_listing(list(display_binned.keys())),
                 ),
             ))
@@ -1611,9 +2094,10 @@ def _add_comparison_section(
                     kind="table",
                     title="Average Curve Data",
                     content=avg_df,
-                    description=_build_section_description(
+                    description=_build_guided_section_description(
+                        "global_average",
                         "Tabulated frequency-grid values behind the global-average plot.",
-                        f"Method: same common-grid averaging as the plot above, using {defn.bin_hz:g} Hz bins.",
+                        f"Method: same common-grid averaging as the plot above, using {defn.avg_bin_hz:g} Hz averaging bins after {defn.bin_hz:g} Hz per-test binning.",
                         _format_flat_test_listing(list(display_binned.keys())),
                     ),
                 ))
@@ -1627,7 +2111,8 @@ def _add_comparison_section(
                 kind="plot",
                 title="Constant-Frequency Boxplots — per Report Target",
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "boxplots",
                     "What you are seeing: one boxplot per constant-frequency test, grouped by selected report target.",
                     (
                         "Method: each box summarizes the distribution of raw flow measurements for one constant-frequency test. "
@@ -1643,7 +2128,8 @@ def _add_comparison_section(
                 kind="plot",
                 title="Aggregated Boxplots per Report Target",
                 content=fig2,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "boxplots",
                     "What you are seeing: all constant-frequency points are pooled within each selected target and summarized in one boxplot.",
                     "Method: raw flow points from all constant tests inside the same target are pooled before calculating the distribution statistics.",
                     _format_nested_test_listing(bar_const),
@@ -1658,7 +2144,8 @@ def _add_comparison_section(
                     kind="plot",
                     title="Flow Distribution Boxplots — All Tests",
                     content=fig,
-                    description=_build_section_description(
+                    description=_build_guided_section_description(
+                        "boxplots",
                         "What you are seeing: one boxplot per individual test, combining all selected test types.",
                         "Method: each box summarizes the raw flow distribution for one test without pooling across targets.",
                         _format_flat_test_listing(list(data.keys())),
@@ -1674,7 +2161,8 @@ def _add_comparison_section(
                 kind="plot",
                 title="Constant-Frequency Histograms — per Report Target",
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "histograms",
                     "What you are seeing: pooled flow histograms for constant-frequency tests, one color per selected target.",
                     "Method: all raw constant-frequency points inside a target are pooled and displayed as an overlaid histogram.",
                     _format_nested_test_listing(bar_const),
@@ -1689,7 +2177,8 @@ def _add_comparison_section(
                     kind="plot",
                     title="Flow Histograms — All Tests",
                     content=fig,
-                    description=_build_section_description(
+                    description=_build_guided_section_description(
+                        "histograms",
                         "What you are seeing: the flow-value distribution of each test as an overlaid histogram.",
                         "Method: raw points are binned by flow magnitude rather than frequency or time, which highlights skewness, multimodality, and spread.",
                         _format_flat_test_listing(list(data.keys())),
@@ -1718,7 +2207,8 @@ def _add_comparison_section(
                             kind="table",
                             title=f"Summary Statistics — {test_type_label} Tests (per Entry)",
                             content=tbl,
-                            description=_build_section_description(
+                            description=_build_guided_section_description(
+                                "summary_table",
                                 f"Summary statistics pooled by selected target for {test_type_label.lower()} tests.",
                                 (
                                     "Method note: frequency-binned mean values are pooled for sweep tests."
@@ -1739,7 +2229,8 @@ def _add_comparison_section(
                     kind="table",
                     title="Summary Statistics — All Tests",
                     content=tbl,
-                    description=_build_section_description(
+                    description=_build_guided_section_description(
+                        "summary_table",
                         "Per-test summary statistics using the raw points supplied to the report.",
                         "Method note: sweep tests contribute prepared sweep points, while constant tests contribute cleaned time-series points.",
                         _format_flat_test_listing(list(data.keys())),
@@ -1761,17 +2252,22 @@ def _add_comparison_section(
                 x_col=x_col,
                 y_col=signal_col,
                 title=f"{name} — Flow vs Time",
-                mode="lines",
+                mode=defn.plot_mode,
+                marker_size=defn.marker_size,
+                opacity=defn.opacity,
             )
+            _apply_axis_bounds(fig, defn.time_axis)
             sections.append(ReportSection(
                 kind="plot",
                 title=f"{name} — Flow vs Time",
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "constant_time_series",
                     "What you are seeing: raw flow versus time for one constant-frequency test.",
                     "Method: the cleaned time-series data are plotted directly without frequency binning so drift, warm-up, settling, or decay remain visible.",
                     _build_time_effect_summary(df, signal_col),
                     "Plot context: no frequency binning is applied in this view.",
+                    _format_render_context(defn, axis_bounds=defn.time_axis, x_name="time", y_name="flow"),
                     _format_flat_test_listing([name]),
                 ),
             ))
@@ -1781,7 +2277,8 @@ def _add_comparison_section(
                 kind="table",
                 title="Constant-Frequency Time-Effect Summary",
                 content=time_effect_df,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "constant_time_series",
                     "Tabulated correlation between time and flow for each constant-frequency test included in the report.",
                     "Method: Pearson correlation and a first-order linear-fit slope are computed from the cleaned time-series points of each constant test.",
                     _format_flat_test_listing(list(display_const.keys())),
@@ -1792,67 +2289,113 @@ def _add_comparison_section(
         if display_sweep:
             capped = {}
             for n, d in display_sweep.items():
-                capped[n] = d.sample(n=50000, random_state=42) if len(d) > 50000 else d
+                capped[n] = (
+                    d.sample(n=defn.max_raw_points, random_state=42)
+                    if len(d) > defn.max_raw_points
+                    else d
+                )
             fig = ap.plot_all_raw_points(
                 capped,
                 freq_col="Frequency",
                 signal_col=signal_col,
+                marker_size=defn.marker_size,
+                opacity=defn.opacity,
             )
+            _apply_axis_bounds(fig, defn.sweep_axis)
             sections.append(ReportSection(
                 kind="plot",
-                title="All Raw Data Points",
+                title="All Raw Sweep Points",
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "raw_points",
                     "What you are seeing: every raw sweep point that was kept for the report, colored by test.",
-                    "Method: sweep data are plotted directly against frequency without averaging. For report size control, each test is capped at 50,000 points before plotting.",
-                    _format_sweep_plot_context(defn),
+                    f"Method: sweep data are plotted directly against frequency without averaging. For report size control, each test is capped at {defn.max_raw_points:,} points before plotting.",
+                    _format_raw_sweep_context(
+                        defn,
+                        axis_bounds=defn.sweep_axis,
+                        max_raw_points=defn.max_raw_points,
+                    ),
+                    _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
                     _format_flat_test_listing(list(capped.keys())),
                 ),
             ))
 
     elif comp == "std_vs_mean":
         if display_binned:
-            fig = ap.plot_std_vs_mean(display_binned)
+            fig = ap.plot_std_vs_mean(
+                display_binned,
+                marker_size=defn.marker_size,
+            )
+            _apply_axis_bounds(fig, defn.variability_axis)
             sections.append(ReportSection(
                 kind="plot",
                 title="Std vs Mean — Variability Analysis",
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "std_vs_mean",
                     "What you are seeing: each point is one frequency bin from one test, positioned by mean flow and within-bin standard deviation.",
                     "Method: after frequency binning, variability is summarized per bin and compared to its mean to assess whether noise scales with flow.",
-                    _format_sweep_plot_context(defn),
+                    _format_sweep_plot_context(defn, axis_bounds=defn.sweep_axis),
+                    _format_variability_context(defn, axis_bounds=defn.variability_axis),
+                    _format_render_context(defn, axis_bounds=defn.variability_axis, x_name="mean flow", y_name="std", include_opacity=False),
                     _format_flat_test_listing(list(display_binned.keys())),
                 ),
             ))
 
     elif comp == "best_region":
         if display_binned:
-            fig, best_df = ap.plot_stability_cloud(display_binned)
+            fig, best_df = ap.plot_stability_cloud(
+                display_binned,
+                mean_threshold_pct=float(defn.mean_threshold_pct),
+                std_threshold_pct=float(defn.std_threshold_pct),
+                marker_size=defn.marker_size,
+            )
+            _apply_axis_bounds(fig, defn.variability_axis)
             sections.append(ReportSection(
                 kind="plot",
                 title="Best Operating Region",
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "best_region",
                     "What you are seeing: candidate operating points that combine high mean flow with low variability.",
-                    "Method: frequency bins are filtered first by mean-flow percentile and then by low-standard-deviation percentile to identify the most stable high-output region.",
-                    _format_sweep_plot_context(defn),
+                    (
+                        f"Method: frequency bins are first filtered to the top {defn.mean_threshold_pct}% by mean flow, "
+                        f"then the lowest {defn.std_threshold_pct}% by standard deviation are retained within that high-flow subset."
+                    ),
+                    _format_sweep_plot_context(defn, axis_bounds=defn.sweep_axis),
+                    _format_variability_context(
+                        defn,
+                        axis_bounds=defn.variability_axis,
+                        include_thresholds=True,
+                    ),
+                    _format_render_context(defn, axis_bounds=defn.variability_axis, x_name="mean flow", y_name="std", include_opacity=False),
                     _format_flat_test_listing(list(display_binned.keys())),
                 ),
             ))
             if not best_df.empty:
-                sections.append(ReportSection(
-                    kind="table",
-                    title="Top Operating Points",
-                    content=best_df[["test", "freq_center", "mean", "std"]].rename(
+                best_table = (
+                    best_df[["test", "freq_center", "mean", "std"]]
+                    .rename(
                         columns={
                             "test": "Test",
                             "freq_center": "Frequency (Hz)",
                             "mean": "Mean (µL/min)",
                             "std": "Std (µL/min)",
                         }
-                    ).sort_values("Mean (µL/min)", ascending=False),
-                    description=_build_section_description(
-                        "Ranked table of the strongest operating points selected by the stability-cloud method.",
+                    )
+                    .sort_values(
+                        ["Std (µL/min)", "Mean (µL/min)"],
+                        ascending=[True, False],
+                    )
+                )
+                sections.append(ReportSection(
+                    kind="table",
+                    title="Top Operating Points",
+                    content=best_table,
+                    description=_build_guided_section_description(
+                        "best_region",
+                        "Ranked table of the operating points selected by the best-region method.",
+                        "Ranking note: rows are ordered first by lower standard deviation and then by higher mean flow, so stability is prioritized after the high-flow filter.",
                         _format_flat_test_listing(list(display_binned.keys())),
                     ),
                 ))
@@ -1864,10 +2407,11 @@ def _add_comparison_section(
                 kind="plot",
                 title="Inter-Test Correlation Heatmap",
                 content=fig,
-                description=_build_section_description(
+                description=_build_guided_section_description(
+                    "correlation",
                     "What you are seeing: the pairwise Pearson correlation between binned mean-flow curves.",
                     "Method: each test is represented by its binned mean curve across frequency; correlations close to 1 indicate very similar shapes across the shared frequency range.",
-                    _format_sweep_plot_context(defn),
+                    _format_sweep_plot_context(defn, axis_bounds=defn.sweep_axis),
                     _format_flat_test_listing(list(display_binned.keys())),
                 ),
             ))
@@ -1890,77 +2434,24 @@ def _load_all_test_data(
     (all_raw, sweep_raw, binned_data, const_raw, signal_col, errors)
     or None.
     """
-    all_raw: dict[str, pd.DataFrame] = {}
-    sweep_raw: dict[str, pd.DataFrame] = {}
-    binned_data: dict[str, pd.DataFrame] = {}
-    const_raw: dict[str, pd.DataFrame] = {}
-    errors: list[str] = []
-    signal_col: str | None = None
+    result = load_and_classify_tests(
+        folder_names,
+        run_dirs,
+        run_names,
+        bin_hz=float(bin_hz),
+    )
 
-    for name in folder_names:
-        idx = run_names.index(name) if name in run_names else -1
-        if idx < 0:
-            errors.append(f"{name}: not found in data folder")
-            continue
-        run_dir = run_dirs[idx]
-        try:
-            pick = pick_best_csv(run_dir)
-            df = load_csv_cached(str(pick.csv_path))
-            if df.empty:
-                errors.append(f"{name}: empty CSV")
-                continue
-
-            time_col = guess_time_column(df)
-            sig_col = guess_signal_column(df, "flow")
-            if not time_col or not sig_col:
-                errors.append(f"{name}: cannot detect columns")
-                continue
-            if signal_col is None:
-                signal_col = sig_col
-
-            time_fmt = detect_time_format(df, time_col)
-            ts_df = prepare_time_series_data(
-                df, time_col, sig_col,
-                parse_time=(time_fmt == "absolute_timestamp"),
-            )
-            all_raw[name] = ts_df
-
-            ttype, _, _ = detect_test_type(name, df, data_root=run_dir.parent)
-            has_freq = "freq_set_hz" in df.columns
-
-            if ttype == "sweep" or (has_freq and df["freq_set_hz"].dropna().nunique() > 1):
-                spec = parse_sweep_spec_from_name(name)
-                if has_freq or (spec and spec.duration_s > 0):
-                    sdf = prepare_sweep_data(
-                        ts_df, time_col, sig_col,
-                        spec=spec,
-                        parse_time=(time_fmt == "absolute_timestamp"),
-                        full_df=df if has_freq else None,
-                    )
-                    sweep_raw[name] = sdf
-                    try:
-                        binned = bin_by_frequency(
-                            sdf, value_col=sig_col,
-                            freq_col="Frequency", bin_hz=bin_hz,
-                        )
-                        binned_data[name] = binned
-                    except Exception as be:
-                        errors.append(f"{name}: binning — {be}")
-                else:
-                    const_raw[name] = ts_df
-            else:
-                const_raw[name] = ts_df
-
-        except Exception as e:
-            errors.append(f"{name}: {e}")
-
-    if not all_raw:
+    if result.is_empty:
         return None
 
-    if signal_col is None:
-        signal_col = "flow"
-
-    return (all_raw, sweep_raw, binned_data, const_raw, signal_col, errors)
+    return (
+        result.all_data,
+        result.sweep_data,
+        result.binned_data,
+        result.const_data,
+        result.signal_col,
+        result.errors,
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════

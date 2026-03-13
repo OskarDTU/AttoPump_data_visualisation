@@ -136,6 +136,19 @@ def find_experiment_log(data_root: str | Path) -> Path | None:
     return None
 
 
+def experiment_log_storage_signature(data_root: str | Path | None) -> tuple[str, int, int]:
+    """Return a file signature for the experiment log near *data_root*."""
+    if data_root is None:
+        return ("", 0, 0)
+
+    log_path = find_experiment_log(data_root)
+    if log_path is None:
+        return ("", 0, 0)
+
+    stat = log_path.stat()
+    return (str(log_path), int(stat.st_mtime_ns), int(stat.st_size))
+
+
 def _clean_scalar(value: object) -> str:
     if value is None or pd.isna(value):
         return ""
@@ -356,6 +369,7 @@ def lookup_experiment_log_entry(
 __all__ = [
     "EXPERIMENT_LOG_FILENAME",
     "ExperimentLogEntry",
+    "experiment_log_storage_signature",
     "extract_constant_frequency_hz",
     "extract_duration_seconds",
     "extract_sweep_parameters",

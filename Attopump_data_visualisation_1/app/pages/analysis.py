@@ -27,7 +27,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from ..data.io_local import normalize_root, pick_best_csv
+from ..data.io_local import normalize_root
 from ..data.config import (
     DATA_EXPORT_DIR,
     DEFAULT_CONSTANT_FREQUENCY_HZ,
@@ -35,21 +35,17 @@ from ..data.config import (
     PLOT_HEIGHT,
 )
 from ..data.data_processor import (
-    bin_by_frequency,
-    detect_constant_frequency,
-    detect_test_type,
-    detect_time_format,
     explain_frequency_bin_recommendation,
     extract_frequency_slice,
     format_bin_choice_label,
-    guess_signal_column,
-    guess_time_column,
-    parse_sweep_spec_from_name,
-    prepare_sweep_data,
-    prepare_time_series_data,
     recommend_frequency_bin_widths,
 )
-from ..data.loader import load_csv_cached, resolve_data_path
+from ..data.loader import (
+    load_and_classify_tests,
+    load_binned_test_data,
+    load_prepared_test_data,
+    resolve_data_path,
+)
 from ..data.pump_registry import (
     AnalysisConfig,
     AVAILABLE_PLOTS,
@@ -58,6 +54,7 @@ from ..data.pump_registry import (
     TestGroup,
     add_test_group,
     migrate_legacy_files,
+    registry_storage_signature,
     save_registry,
     sync_pumps_from_experiment_log,
     upsert_analysis_config,
@@ -85,7 +82,7 @@ from ..plots.bar_comparison_plots import (
     plot_bar_sweep_relative,
 )
 from ..plots.plot_generator import export_html, plot_sweep_binned
-from ..plot_guidance import render_plot_guide
+from ..plot_guidance import render_plot_explanation, render_plot_guide
 from .unknown_test_prompt import classify_tests_quick, render_unknown_test_prompt
 
 
@@ -96,14 +93,21 @@ from .unknown_test_prompt import classify_tests_quick, render_unknown_test_promp
 def _get_registry() -> PumpRegistry:
     """Return the in-memory pump registry (loads from disk on first access)."""
     key = "_pump_registry"
-    if key not in st.session_state:
+    sig_key = "_pump_registry_signature"
+    current_sig = registry_storage_signature()
+    if (
+        key not in st.session_state
+        or st.session_state.get(sig_key) != current_sig
+    ):
         st.session_state[key] = migrate_legacy_files()
+        st.session_state[sig_key] = registry_storage_signature()
     return st.session_state[key]
 
 
 def _persist() -> None:
     """Flush the pump registry to ``pump_registry.json``."""
     save_registry(_get_registry())
+    st.session_state["_pump_registry_signature"] = registry_storage_signature()
 
 
 def _build_saved_test_group_options(
@@ -147,52 +151,35 @@ def _recommend_bins_for_tests_cached(
     if not test_names:
         return None
 
+    run_map = {name: run_dir for name, run_dir in zip(run_names, run_dir_strs)}
     sweep_frames: list[pd.DataFrame] = []
+    signal_col = "flow"
+
     for name in test_names:
-        if name not in run_names:
+        run_dir_str = run_map.get(name)
+        if run_dir_str is None:
             continue
-        idx = run_names.index(name)
-        run_dir = Path(run_dir_strs[idx])
-        pick = pick_best_csv(run_dir)
-        df = load_csv_cached(str(pick.csv_path))
-        if df.empty:
+        try:
+            prepared = load_prepared_test_data(name, run_dir_str)
+        except Exception:
             continue
-
-        time_col = guess_time_column(df)
-        sig_col = guess_signal_column(df, "flow")
-        if not time_col or not sig_col:
+        if prepared.sweep_data is None:
             continue
-
-        time_fmt = detect_time_format(df, time_col)
-        ts_df = prepare_time_series_data(
-            df,
-            time_col,
-            sig_col,
-            parse_time=(time_fmt == "absolute_timestamp"),
-        )
-        ttype, _, _ = detect_test_type(name, df, data_root=run_dir.parent)
-        has_freq = "freq_set_hz" in df.columns
-        spec = parse_sweep_spec_from_name(name)
-        is_sweep = ttype == "sweep" or (
-            has_freq and df["freq_set_hz"].dropna().nunique() > 1
-        )
-        if not is_sweep or (not has_freq and not (spec and spec.duration_s > 0)):
-            continue
-
-        sweep_frames.append(
-            prepare_sweep_data(
-                ts_df,
-                time_col,
-                sig_col,
-                spec=spec,
-                parse_time=(time_fmt == "absolute_timestamp"),
-                full_df=df if has_freq else None,
-            )
-        )
+        signal_col = prepared.signal_col
+        sweep_frames.append(prepared.sweep_data)
 
     if not sweep_frames:
         return None
-    return recommend_frequency_bin_widths(sweep_frames)
+    recommendation = recommend_frequency_bin_widths(
+        sweep_frames,
+        value_col=signal_col,
+    )
+    if (
+        int(recommendation.get("test_series_count", 0)) < 2
+        and int(recommendation.get("average_series_count", 0)) < 2
+    ):
+        return None
+    return recommendation
 
 
 def _current_analysis_test_selection(
@@ -314,12 +301,29 @@ def _maybe_seed_analysis_bin_defaults(
     )
     if not recommendation:
         st.session_state.pop("_analysis_bin_recommendation", None)
+        st.session_state["_analysis_bin_signature"] = signature
         return
 
-    st.session_state["a_bin"] = recommendation["test_bin_hz"]
-    st.session_state["a_avg"] = recommendation["average_bin_hz"]
+    if int(recommendation.get("test_series_count", 0)) >= 2:
+        st.session_state["a_bin"] = recommendation["test_bin_hz"]
+    if int(recommendation.get("average_series_count", 0)) >= 2:
+        st.session_state["a_avg"] = recommendation["average_bin_hz"]
     st.session_state["_analysis_bin_signature"] = signature
     st.session_state["_analysis_bin_recommendation"] = recommendation
+
+
+def _reset_analysis_test_bin() -> None:
+    """Reset the per-test/overlay bin width to the current recommendation."""
+    recommendation = st.session_state.get("_analysis_bin_recommendation")
+    if recommendation and int(recommendation.get("test_series_count", 0)) >= 2:
+        st.session_state["a_bin"] = float(recommendation["test_bin_hz"])
+
+
+def _reset_analysis_average_bin() -> None:
+    """Reset the cross-test average bin width to the current recommendation."""
+    recommendation = st.session_state.get("_analysis_bin_recommendation")
+    if recommendation and int(recommendation.get("average_series_count", 0)) >= 2:
+        st.session_state["a_avg"] = float(recommendation["average_bin_hz"])
 
 
 TEST_ANALYSIS_PLOTS = [
@@ -579,6 +583,20 @@ def _render_export_destination(S: dict) -> None:
     st.caption(f"Export folder: `{export_dir}`")
 
 
+def _render_plot_help(
+    plot_id: str,
+    *,
+    label: str,
+    extra_markdown: str | None = None,
+) -> None:
+    """Show the shared thesis-based explanation for one rendered plot."""
+    render_plot_explanation(
+        plot_id,
+        label=label,
+        extra_markdown=extra_markdown,
+    )
+
+
 def _plot_time_series_overlay(
     all_data: dict[str, pd.DataFrame],
     signal_col: str,
@@ -680,20 +698,37 @@ def main() -> None:  # noqa: C901
                 "Frequency bin width (Hz)", 0.5, 100.0,
                 float(PLOT_BIN_WIDTH_HZ), 0.5, key="a_bin",
             )
+            bin_reco = st.session_state.get("_analysis_bin_recommendation")
+            if bin_reco and int(bin_reco.get("test_series_count", 0)) >= 2:
+                st.caption(
+                    "Recommended for per-test and overlay sweep plots: "
+                    + explain_frequency_bin_recommendation(
+                        bin_reco,
+                        include_average_bin=False,
+                    )
+                )
+                st.button(
+                    "Reset plot bin to recommended",
+                    key="a_reset_bin",
+                    on_click=_reset_analysis_test_bin,
+                )
             avg_bin_hz = st.slider(
                 "Average-curve bin width (Hz)", 0.5, 100.0,
                 3.0, 0.5, key="a_avg",
             )
-            bin_reco = st.session_state.get("_analysis_bin_recommendation")
-            if bin_reco:
+            if bin_reco and int(bin_reco.get("average_series_count", 0)) >= 2:
                 st.caption(
-                    "Recommended for current selection: "
-                    + explain_frequency_bin_recommendation(bin_reco)
+                    "Recommended for cross-test averages: "
+                    + explain_frequency_bin_recommendation(
+                        bin_reco,
+                        include_average_bin=True,
+                    )
                 )
-                if st.button("Reset bins to recommended", key="a_reset_bins"):
-                    st.session_state["a_bin"] = bin_reco["test_bin_hz"]
-                    st.session_state["a_avg"] = bin_reco["average_bin_hz"]
-                    st.rerun()
+                st.button(
+                    "Reset average bin to recommended",
+                    key="a_reset_avg_bin",
+                    on_click=_reset_analysis_average_bin,
+                )
             show_all_points = st.checkbox(
                 "Plot all raw data points",
                 value=True,
@@ -728,7 +763,7 @@ def main() -> None:  # noqa: C901
                 "Opacity", 0.1, 1.0, 0.8, 0.05, key="a_opa",
             )
             err_bars = st.checkbox(
-                "Show ±1 std bands", True, key="a_err",
+                "Show ±1 std error bars", True, key="a_err",
             )
             export = st.checkbox(
                 "Export plots as HTML folder", False, key="a_exp",
@@ -1010,6 +1045,10 @@ def _render_selected_test_analysis(
         fig_ts = _plot_time_series_overlay(all_data, signal_col, scoped_settings)
         st.plotly_chart(fig_ts, use_container_width=True)
         _maybe_export(fig_ts, "time_series_overlay.html", scoped_settings)
+        _render_plot_help(
+            "time_series",
+            label="ℹ️ Time-series overlay — what this plot means",
+        )
         st.divider()
 
     mixed_mode = False
@@ -1285,104 +1324,27 @@ def _load_tests(
      errors, test_types, const_freqs)
     or ``None`` if nothing loaded.
     """
-    all_data: dict[str, pd.DataFrame] = {}
-    sweep_data: dict[str, pd.DataFrame] = {}
-    binned_data: dict[str, pd.DataFrame] = {}
-    const_data: dict[str, pd.DataFrame] = {}
-    load_errors: list[str] = []
-    signal_col: str | None = None
-    test_types: dict[str, str] = {}
-    const_freqs: dict[str, float] = {}
-
     with st.spinner(f"Loading {len(selected_names)} test(s)…"):
-        for name in selected_names:
-            idx = run_names.index(name) if name in run_names else -1
-            if idx < 0:
-                load_errors.append(f"{name}: not found in data folder")
-                continue
-            run_dir = run_dirs[idx]
+        result = load_and_classify_tests(
+            selected_names,
+            run_dirs,
+            run_names,
+            bin_hz=float(S["bin_hz"]),
+        )
 
-            try:
-                pick = pick_best_csv(run_dir)
-                df = load_csv_cached(str(pick.csv_path))
-                if df.empty:
-                    load_errors.append(f"{name}: empty CSV")
-                    continue
-
-                time_col = guess_time_column(df)
-                sig_col = guess_signal_column(df, "flow")
-                if not time_col or not sig_col:
-                    load_errors.append(f"{name}: cannot detect columns")
-                    continue
-                if signal_col is None:
-                    signal_col = sig_col
-
-                time_fmt = detect_time_format(df, time_col)
-                ts_df = prepare_time_series_data(
-                    df, time_col, sig_col,
-                    parse_time=(time_fmt == "absolute_timestamp"),
-                )
-                all_data[name] = ts_df
-
-                # Classify
-                ttype, _, _ = detect_test_type(name, df, data_root=run_dir.parent)
-                test_types[name] = ttype
-                has_freq = "freq_set_hz" in df.columns
-
-                if (ttype == "sweep"
-                        or (has_freq and df["freq_set_hz"].dropna().nunique() > 1)):
-                    # ── Sweep path ──────────────────────────────────────
-                    spec = parse_sweep_spec_from_name(name)
-                    if has_freq or (spec and spec.duration_s > 0):
-                        sweep_df = prepare_sweep_data(
-                            ts_df, time_col, sig_col,
-                            spec=spec,
-                            parse_time=(time_fmt == "absolute_timestamp"),
-                            full_df=df if has_freq else None,
-                        )
-                        sweep_data[name] = sweep_df
-                        try:
-                            binned = bin_by_frequency(
-                                sweep_df, value_col=sig_col,
-                                freq_col="Frequency", bin_hz=S["bin_hz"],
-                            )
-                            binned_data[name] = binned
-                        except Exception as be:
-                            load_errors.append(f"{name}: binning — {be}")
-                    else:
-                        # Sweep by name but no usable freq data → treat as const
-                        const_data[name] = ts_df
-                        cf = detect_constant_frequency(
-                            df,
-                            name,
-                            data_root=run_dir.parent,
-                        )
-                        if cf:
-                            const_freqs[name] = cf
-                else:
-                    # ── Constant frequency path ─────────────────────────
-                    const_data[name] = ts_df
-                    cf = detect_constant_frequency(
-                        df,
-                        name,
-                        data_root=run_dir.parent,
-                    )
-                    if cf:
-                        const_freqs[name] = cf
-
-            except Exception as e:
-                load_errors.append(f"{name}: {e}")
-
-    if not all_data:
+    if result.is_empty:
         st.error("❌ No tests loaded successfully.")
         return None
 
-    if signal_col is None:
-        signal_col = "flow"
-
     return (
-        all_data, sweep_data, binned_data, const_data,
-        signal_col, load_errors, test_types, const_freqs,
+        result.all_data,
+        result.sweep_data,
+        result.binned_data,
+        result.const_data,
+        result.signal_col,
+        result.errors,
+        result.test_types,
+        result.const_freqs,
     )
 
 
@@ -1443,6 +1405,10 @@ def _render_sweep_analysis(
                         )
                         st.plotly_chart(fig_b, use_container_width=True)
                         _maybe_export(fig_b, f"{_slugify(name)}_binned.html", S)
+                        _render_plot_help(
+                            "individual_sweeps",
+                            label="ℹ️ Binned mean curve — what this plot means",
+                        )
 
                         if name in sweep_data:
                             fig_sw = plot_per_test_sweeps(
@@ -1458,6 +1424,10 @@ def _render_sweep_analysis(
                                 fig_sw,
                                 f"{_slugify(name)}_per_sweep.html",
                                 S,
+                            )
+                            _render_plot_help(
+                                "individual_sweeps",
+                                label="ℹ️ Per-sweep breakdown — what this plot means",
                             )
 
                         if name in sweep_data and signal_col in sweep_data[name].columns:
@@ -1486,6 +1456,10 @@ def _render_sweep_analysis(
                     )
                     st.plotly_chart(fig_comb, use_container_width=True)
                     _maybe_export(fig_comb, "combined_overlay.html", S)
+                    _render_plot_help(
+                        "sweep_overlay",
+                        label="ℹ️ Sweep overlay — what this plot means",
+                    )
                 if "sweep_relative" in active_plots:
                     if "sweep_overlay" in active_plots:
                         st.divider()
@@ -1501,6 +1475,10 @@ def _render_sweep_analysis(
                     )
                     st.plotly_chart(fig_rel, use_container_width=True)
                     _maybe_export(fig_rel, "relative_comparison.html", S)
+                    _render_plot_help(
+                        "sweep_relative",
+                        label="ℹ️ Relative sweep comparison — what this plot means",
+                    )
 
             elif tab_key == "average":
                 st.subheader("Global Average Across Tests")
@@ -1520,6 +1498,10 @@ def _render_sweep_analysis(
                 )
                 st.plotly_chart(fig_avg, use_container_width=True)
                 _maybe_export(fig_avg, "global_average.html", S)
+                _render_plot_help(
+                    "global_average",
+                    label="ℹ️ Global average curve — what this plot means",
+                )
                 with st.expander("📋 Average Curve Data"):
                     st.dataframe(avg_df, use_container_width=True, hide_index=True)
 
@@ -1553,6 +1535,10 @@ def _render_sweep_analysis(
                 )
                 st.plotly_chart(fig_raw, use_container_width=True)
                 _maybe_export(fig_raw, "all_raw_points.html", S)
+                _render_plot_help(
+                    "raw_points",
+                    label="ℹ️ Raw sweep points — what this plot means",
+                )
 
             elif tab_key == "eda":
                 st.subheader("Exploratory Data Analysis")
@@ -1576,6 +1562,10 @@ def _render_sweep_analysis(
                                 "CV (%)": st.column_config.NumberColumn(format="%.2f"),
                             },
                         )
+                        _render_plot_help(
+                            "summary_table",
+                            label="ℹ️ Summary statistics table — how to use it",
+                        )
 
                 if "boxplots" in active_plots or "histograms" in active_plots:
                     col_l, col_r = st.columns(2)
@@ -1588,6 +1578,10 @@ def _render_sweep_analysis(
                             )
                             st.plotly_chart(fig_box, use_container_width=True)
                             _maybe_export(fig_box, "eda_boxplots.html", S)
+                            _render_plot_help(
+                                "boxplots",
+                                label="ℹ️ Boxplots — what this plot means",
+                            )
                     if "histograms" in active_plots:
                         with col_r:
                             st.markdown("### 📊 Histograms")
@@ -1605,6 +1599,10 @@ def _render_sweep_analysis(
                             )
                             st.plotly_chart(fig_hist, use_container_width=True)
                             _maybe_export(fig_hist, "eda_histograms.html", S)
+                            _render_plot_help(
+                                "histograms",
+                                label="ℹ️ Histograms — what this plot means",
+                            )
 
                 if "correlation" in active_plots:
                     st.markdown("### 🔗 Inter-Test Correlation")
@@ -1612,6 +1610,10 @@ def _render_sweep_analysis(
                         fig_corr = plot_correlation_heatmap(binned_data)
                         st.plotly_chart(fig_corr, use_container_width=True)
                         _maybe_export(fig_corr, "correlation_heatmap.html", S)
+                        _render_plot_help(
+                            "correlation",
+                            label="ℹ️ Correlation heatmap — what this plot means",
+                        )
                     else:
                         st.info("Need at least 2 binned tests for correlation.")
 
@@ -1626,6 +1628,10 @@ def _render_sweep_analysis(
                 )
                 st.plotly_chart(fig_svm, use_container_width=True)
                 _maybe_export(fig_svm, "std_vs_mean.html", S)
+                _render_plot_help(
+                    "std_vs_mean",
+                    label="ℹ️ Std vs mean — what this plot means",
+                )
                 with st.expander("ℹ️ Interpretation guide"):
                     st.markdown(
                         """
@@ -1652,6 +1658,10 @@ def _render_sweep_analysis(
                     marker_size=S["marker_sz"],
                 )
                 st.plotly_chart(fig_stab, use_container_width=True)
+                _render_plot_help(
+                    "best_region",
+                    label="ℹ️ Best operating region — what this plot means",
+                )
                 st.markdown(
                     f"**Method:** Top {S['mean_pct']}% by mean flow → orange.  "
                     f"Bottom {S['std_pct']}% by std within those → 🟢 green stars."
@@ -1669,6 +1679,10 @@ def _render_sweep_analysis(
                         .sort_values("Mean (µL/min)", ascending=False),
                         use_container_width=True,
                         hide_index=True,
+                    )
+                    _render_plot_help(
+                        "best_region",
+                        label="ℹ️ Best operating points table — how to use it",
                     )
                 _maybe_export(fig_stab, "stability_cloud.html", S)
 
@@ -1707,6 +1721,10 @@ def _render_constant_analysis(
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 _maybe_export(fig, "constant_boxplots.html", S)
+                _render_plot_help(
+                    "boxplots",
+                    label="ℹ️ Constant-test boxplots — what this plot means",
+                )
             elif tab_key == "histograms":
                 nbins = st.slider(
                     "Bins",
@@ -1723,6 +1741,10 @@ def _render_constant_analysis(
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 _maybe_export(fig, "constant_histograms.html", S)
+                _render_plot_help(
+                    "histograms",
+                    label="ℹ️ Constant-test histograms — what this plot means",
+                )
             elif tab_key == "summary":
                 stats = build_summary_table(const_data, signal_col=signal_col)
                 if not stats.empty:
@@ -1733,6 +1755,10 @@ def _render_constant_analysis(
                         column_config={
                             "CV (%)": st.column_config.NumberColumn(format="%.2f"),
                         },
+                    )
+                    _render_plot_help(
+                        "summary_table",
+                        label="ℹ️ Constant-test summary table — how to use it",
                     )
                 else:
                     st.info("No signal data available.")
@@ -1778,6 +1804,15 @@ def _render_mixed_comparison(
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 _maybe_export(fig, "mixed_boxplots.html", S)
+                _render_plot_help(
+                    "boxplots",
+                    label="ℹ️ Cross-type boxplots — what this plot means",
+                    extra_markdown=(
+                        f"**Current comparison context**\n\nSweep tests were filtered to "
+                        f"{target_freq:.0f} ± {S['freq_tol']:.0f} Hz before being compared "
+                        "with constant-frequency tests."
+                    ),
+                )
             elif tab_key == "histograms":
                 nbins = st.slider(
                     "Bins",
@@ -1794,6 +1829,15 @@ def _render_mixed_comparison(
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 _maybe_export(fig, "mixed_histograms.html", S)
+                _render_plot_help(
+                    "histograms",
+                    label="ℹ️ Cross-type histograms — what this plot means",
+                    extra_markdown=(
+                        f"**Current comparison context**\n\nSweep tests were filtered to "
+                        f"{target_freq:.0f} ± {S['freq_tol']:.0f} Hz before being compared "
+                        "with constant-frequency tests."
+                    ),
+                )
             elif tab_key == "summary":
                 stats = build_summary_table(matched_data, signal_col=signal_col)
                 if not stats.empty:
@@ -1804,6 +1848,10 @@ def _render_mixed_comparison(
                         column_config={
                             "CV (%)": st.column_config.NumberColumn(format="%.2f"),
                         },
+                    )
+                    _render_plot_help(
+                        "summary_table",
+                        label="ℹ️ Cross-type summary table — how to use it",
                     )
 
 
@@ -1847,68 +1895,31 @@ def _load_collection_data(
                     continue
 
                 try:
-                    pick = pick_best_csv(run_dir)
-                    df = load_csv_cached(str(pick.csv_path))
-                    if df.empty:
-                        load_errors.append(f"{collection_name}/{test_name}: empty")
-                        continue
-
-                    time_col = guess_time_column(df)
-                    sig_col = guess_signal_column(df, "flow")
-                    if not time_col or not sig_col:
-                        load_errors.append(
-                            f"{collection_name}/{test_name}: cannot detect columns"
-                        )
-                        continue
+                    prepared = load_prepared_test_data(test_name, run_dir)
                     if signal_col is None:
-                        signal_col = sig_col
+                        signal_col = prepared.signal_col
 
-                    time_fmt = detect_time_format(df, time_col)
-                    ts_df = prepare_time_series_data(
-                        df,
-                        time_col,
-                        sig_col,
-                        parse_time=(time_fmt == "absolute_timestamp"),
-                    )
-
-                    test_type, _, _ = detect_test_type(
-                        test_name,
-                        df,
-                        data_root=run_dir.parent,
-                    )
-                    has_freq = "freq_set_hz" in df.columns
-                    spec = parse_sweep_spec_from_name(test_name)
-
-                    if test_type == "sweep" or (
-                        has_freq and df["freq_set_hz"].dropna().nunique() > 1
-                    ):
-                        if has_freq or (spec and spec.duration_s > 0):
-                            sweep_df = prepare_sweep_data(
-                                ts_df,
-                                time_col,
-                                sig_col,
-                                spec=spec,
-                                parse_time=(time_fmt == "absolute_timestamp"),
-                                full_df=df if has_freq else None,
+                    if prepared.sweep_data is not None:
+                        collection_sweep_raw[collection_name][test_name] = (
+                            prepared.sweep_data
+                        )
+                        try:
+                            binned = load_binned_test_data(
+                                test_name,
+                                run_dir,
+                                bin_hz=float(S["bin_hz"]),
                             )
-                            collection_sweep_raw[collection_name][test_name] = sweep_df
-                            try:
-                                collection_sweep_binned[collection_name][test_name] = (
-                                    bin_by_frequency(
-                                        sweep_df,
-                                        value_col=sig_col,
-                                        freq_col="Frequency",
-                                        bin_hz=S["bin_hz"],
-                                    )
-                                )
-                            except Exception as exc:
-                                load_errors.append(
-                                    f"{collection_name}/{test_name}: binning — {exc}"
-                                )
-                        else:
-                            collection_const_data[collection_name][test_name] = ts_df
-                    else:
-                        collection_const_data[collection_name][test_name] = ts_df
+                            if binned is not None:
+                                collection_sweep_binned[collection_name][test_name] = binned
+                        except Exception as exc:
+                            load_errors.append(
+                                f"{collection_name}/{test_name}: binning — {exc}"
+                            )
+
+                    if prepared.const_data is not None:
+                        collection_const_data[collection_name][test_name] = (
+                            prepared.const_data
+                        )
 
                 except Exception as exc:
                     load_errors.append(f"{collection_name}/{test_name}: {exc}")
@@ -2060,6 +2071,10 @@ def _render_collection_comparison(
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 _maybe_export(fig, f"{collection_label}_sweep_overlay.html", scoped_settings)
+                _render_plot_help(
+                    "sweep_overlay",
+                    label=f"ℹ️ {collection_label.title()} sweep overlay — what this plot means",
+                )
 
             elif tab_key == "sweep_relative":
                 st.subheader(
@@ -2079,6 +2094,10 @@ def _render_collection_comparison(
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 _maybe_export(fig, f"{collection_label}_sweep_relative.html", scoped_settings)
+                _render_plot_help(
+                    "sweep_relative",
+                    label=f"ℹ️ {collection_label.title()} relative sweep — what this plot means",
+                )
 
             elif tab_key == "boxplots":
                 st.subheader(
@@ -2105,6 +2124,10 @@ def _render_collection_comparison(
                     )
                 st.plotly_chart(fig, use_container_width=True)
                 _maybe_export(fig, f"{collection_label}_constant_boxplots.html", scoped_settings)
+                _render_plot_help(
+                    "boxplots",
+                    label=f"ℹ️ {collection_label.title()} boxplots — what this plot means",
+                )
 
             elif tab_key == "histograms":
                 st.subheader("Constant-Frequency Histograms")
@@ -2122,6 +2145,10 @@ def _render_collection_comparison(
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 _maybe_export(fig, f"{collection_label}_constant_histograms.html", scoped_settings)
+                _render_plot_help(
+                    "histograms",
+                    label=f"ℹ️ {collection_label.title()} histograms — what this plot means",
+                )
 
             elif tab_key == "summary":
                 st.subheader(f"Summary Statistics per {collection_label.title()}")
@@ -2161,6 +2188,10 @@ def _render_collection_comparison(
                         column_config={
                             "CV (%)": st.column_config.NumberColumn(format="%.2f"),
                         },
+                    )
+                    _render_plot_help(
+                        "summary_table",
+                        label=f"ℹ️ {collection_label.title()} summary table — how to use it",
                     )
                 else:
                     st.info("No data available for summary.")

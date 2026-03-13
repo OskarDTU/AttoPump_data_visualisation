@@ -57,6 +57,27 @@ from .config import (
 )
 from .experiment_log import lookup_experiment_log_entry
 
+_FREQUENCY_HOLD_RUN_MULTIPLIER = 4.0
+_MIN_FREQUENCY_HOLD_POINTS = 50
+_RECOMMENDATION_ROLLING_WINDOW = 5
+_RECOMMENDATION_ROLLING_STD_TARGET_FRACTION = 0.05
+_RECOMMENDATION_ISOLATED_JUMP_TARGET_FRACTION = 0.025
+_RECOMMENDATION_ISOLATED_JUMP_RATIO = 1.75
+_RECOMMENDATION_BIN_WIDTH_PENALTY = 0.35
+_RECOMMENDATION_ROUGHNESS_PERCENTILE = 90.0
+_RECOMMENDATION_RESERVED_COLUMNS = {
+    "elapsed_s",
+    "frequency",
+    "freq_center",
+    "freq_set_hz",
+    "isfrequencyhold",
+    "frequencyrunid",
+    "frequencyrunpoints",
+    "sweep",
+    "t_s",
+    "time",
+}
+
 # ============================================================================
 # TEST METADATA (loaded once, cached)
 # ============================================================================
@@ -64,12 +85,36 @@ _METADATA_PATH = Path(__file__).parent / "test_metadata.json"
 _USER_PATTERNS_PATH = Path(__file__).parent / "user_patterns.json"
 
 _metadata_cache: dict | None = None
+_metadata_cache_signature: tuple[str, int, int] | None = None
+_user_patterns_cache: list[str] | None = None
+_user_patterns_cache_signature: tuple[str, int, int] | None = None
+
+
+def _path_signature(path: Path) -> tuple[str, int, int]:
+    """Return a cheap file signature for cache invalidation."""
+    if not path.exists():
+        return (str(path), 0, 0)
+    stat = path.stat()
+    return (str(path), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def test_metadata_storage_signature() -> tuple[str, int, int]:
+    """Return a file signature for ``test_metadata.json``."""
+    return _path_signature(_METADATA_PATH)
+
+
+def user_patterns_storage_signature() -> tuple[str, int, int]:
+    """Return a file signature for ``user_patterns.json``."""
+    return _path_signature(_USER_PATTERNS_PATH)
 
 
 def load_test_metadata() -> dict:
     """Load the test metadata JSON file. Cached after first load."""
     global _metadata_cache
-    if _metadata_cache is not None:
+    global _metadata_cache_signature
+
+    signature = test_metadata_storage_signature()
+    if _metadata_cache is not None and _metadata_cache_signature == signature:
         return _metadata_cache
 
     if _METADATA_PATH.exists():
@@ -78,12 +123,14 @@ def load_test_metadata() -> dict:
         _metadata_cache = raw.get("tests", {})
     else:
         _metadata_cache = {}
+    _metadata_cache_signature = signature
     return _metadata_cache
 
 
 def save_metadata_entry(folder_name: str, entry: dict) -> None:
     """Add or update a single entry in test_metadata.json."""
     global _metadata_cache
+    global _metadata_cache_signature
 
     if _METADATA_PATH.exists():
         with open(_METADATA_PATH, "r") as f:
@@ -98,20 +145,36 @@ def save_metadata_entry(folder_name: str, entry: dict) -> None:
 
     # Invalidate cache
     _metadata_cache = None
+    _metadata_cache_signature = None
 
 
 def load_user_patterns() -> list[str]:
     """Load user-defined sweep regex patterns (raw strings)."""
+    global _user_patterns_cache
+    global _user_patterns_cache_signature
+
+    signature = user_patterns_storage_signature()
+    if _user_patterns_cache is not None and _user_patterns_cache_signature == signature:
+        return _user_patterns_cache
+
     if _USER_PATTERNS_PATH.exists():
         with open(_USER_PATTERNS_PATH, "r") as f:
-            return json.load(f)
-    return []
+            _user_patterns_cache = json.load(f)
+    else:
+        _user_patterns_cache = []
+    _user_patterns_cache_signature = signature
+    return _user_patterns_cache
 
 
 def save_user_patterns(patterns: list[str]) -> None:
     """Save user-defined sweep regex patterns."""
+    global _user_patterns_cache
+    global _user_patterns_cache_signature
+
     with open(_USER_PATTERNS_PATH, "w") as f:
         json.dump(patterns, f, indent=2)
+    _user_patterns_cache = None
+    _user_patterns_cache_signature = None
 
 
 def detect_test_type(
@@ -319,12 +382,56 @@ def detect_time_format(df: pd.DataFrame, time_col: str) -> str:
         return 'absolute_timestamp'
 
 
+def _annotate_frequency_holds(
+    sweep_df: pd.DataFrame,
+    *,
+    freq_col: str = "Frequency",
+) -> pd.DataFrame:
+    """Flag unusually long constant-frequency runs as hold segments."""
+    out = sweep_df.copy()
+    out["FrequencyRunId"] = np.arange(len(out), dtype=int)
+    out["FrequencyRunPoints"] = 1
+    out["IsFrequencyHold"] = False
+
+    if out.empty or freq_col not in out.columns:
+        return out
+
+    freq = pd.to_numeric(out[freq_col], errors="coerce").round(6)
+    if freq.notna().sum() < 2:
+        return out
+
+    run_id = freq.ne(freq.shift()).cumsum()
+    run_sizes = run_id.value_counts().sort_index()
+    repeated_sizes = run_sizes[run_sizes > 1]
+    typical_run_points = (
+        float(repeated_sizes.median())
+        if not repeated_sizes.empty
+        else float(run_sizes.median())
+    )
+    if not np.isfinite(typical_run_points) or typical_run_points <= 0:
+        return out
+
+    hold_threshold = max(
+        float(_MIN_FREQUENCY_HOLD_POINTS),
+        typical_run_points * _FREQUENCY_HOLD_RUN_MULTIPLIER,
+    )
+    hold_ids = set(run_sizes[run_sizes >= hold_threshold].index.tolist())
+
+    out["FrequencyRunId"] = run_id.astype(int)
+    out["FrequencyRunPoints"] = run_id.map(run_sizes).astype(int)
+    if hold_ids:
+        out["IsFrequencyHold"] = out["FrequencyRunId"].isin(hold_ids)
+
+    return out
+
+
 def prepare_time_series_data(
     df: pd.DataFrame,
     time_col: str,
     signal_col: str,
     parse_time: bool = True,
     drop_na: bool = DROPNA_DEFAULT,
+    time_format: str | None = None,
 ) -> pd.DataFrame:
     """Prepare data for time series plotting.
     
@@ -343,10 +450,10 @@ def prepare_time_series_data(
     plot_df = plot_df.reset_index(drop=True)
     
     # Detect time format
-    time_format = detect_time_format(df, time_col)
-    
+    resolved_time_format = time_format or detect_time_format(df, time_col)
+
     # Parse time ONLY if it's an absolute timestamp
-    if parse_time and time_format == 'absolute_timestamp':
+    if parse_time and resolved_time_format == "absolute_timestamp":
         plot_df[time_col] = pd.to_datetime(
             plot_df[time_col], 
             errors=TIME_PARSE_ERROR_HANDLING
@@ -373,6 +480,7 @@ def prepare_sweep_data(
     parse_time: bool = True,
     drop_na: bool = DROPNA_DEFAULT,
     full_df: pd.DataFrame | None = None,
+    time_format: str | None = None,
 ) -> pd.DataFrame:
     """Prepare data for sweep analysis.
 
@@ -416,8 +524,8 @@ def prepare_sweep_data(
     sweep_df = sweep_df.reset_index(drop=True)
 
     # ── Time parsing (absolute timestamps only) ────────────────────
-    time_format = detect_time_format(source_df, time_col)
-    if parse_time and time_format == "absolute_timestamp":
+    resolved_time_format = time_format or detect_time_format(source_df, time_col)
+    if parse_time and resolved_time_format == "absolute_timestamp":
         sweep_df[time_col] = pd.to_datetime(
             sweep_df[time_col], errors=TIME_PARSE_ERROR_HANDLING
         )
@@ -432,7 +540,7 @@ def prepare_sweep_data(
         raise ValueError("No data remaining after time-series preparation.")
 
     # ── Elapsed seconds ────────────────────────────────────────────
-    if time_format == "elapsed_seconds":
+    if resolved_time_format == "elapsed_seconds":
         sweep_df["Elapsed_s"] = pd.to_numeric(sweep_df[time_col], errors="coerce")
     elif not sweep_df.empty and np.issubdtype(sweep_df[time_col].dtype, np.datetime64):
         sweep_df["Elapsed_s"] = (
@@ -510,7 +618,7 @@ def prepare_sweep_data(
     else:
         sweep_df["Sweep"] = 0
 
-    return sweep_df
+    return _annotate_frequency_holds(sweep_df)
 
 
 def bin_by_frequency(
@@ -519,9 +627,17 @@ def bin_by_frequency(
     freq_col: str = "Frequency",
     bin_hz: float = 5.0,
     max_bins: int = 10000,
+    exclude_frequency_holds: bool = True,
 ) -> pd.DataFrame:
     """Bin frequency sweep data and compute mean ± std per bin."""
-    out = df[[freq_col, value_col]].dropna().copy()
+    cols = [freq_col, value_col]
+    if exclude_frequency_holds and "IsFrequencyHold" in df.columns:
+        cols.append("IsFrequencyHold")
+
+    out = df[cols].copy()
+    if exclude_frequency_holds and "IsFrequencyHold" in out.columns:
+        out = out.loc[~out["IsFrequencyHold"]].drop(columns=["IsFrequencyHold"])
+    out = out.dropna().copy()
 
     f = out[freq_col].astype(float).to_numpy()
     v = out[value_col].astype(float).to_numpy()
@@ -565,34 +681,291 @@ def bin_by_frequency(
     return binned.sort_values("freq_center")
 
 
+def _infer_recommendation_value_col(
+    frames: list[pd.DataFrame],
+    value_col: str | None,
+) -> str | None:
+    """Resolve the signal column used for automatic bin recommendations."""
+    if value_col:
+        return value_col
+
+    for frame in frames:
+        if frame.empty:
+            continue
+        numeric_cols = frame.select_dtypes(include=["number"]).columns.tolist()
+        for col in numeric_cols:
+            if col.lower() not in _RECOMMENDATION_RESERVED_COLUMNS:
+                return col
+    return None
+
+
+def _extract_overlay_series(
+    frames: list[pd.DataFrame],
+    *,
+    value_col: str,
+    freq_col: str,
+    sweep_col: str,
+    split_by_sweep: bool,
+) -> list[pd.DataFrame]:
+    """Build the overlaid series used when scoring candidate bin widths."""
+    overlay_series: list[pd.DataFrame] = []
+
+    for frame in frames:
+        if frame.empty or freq_col not in frame.columns or value_col not in frame.columns:
+            continue
+
+        working = frame.copy()
+        if "IsFrequencyHold" in working.columns:
+            working = working.loc[~working["IsFrequencyHold"]].copy()
+        if working.empty:
+            continue
+
+        groups: list[pd.DataFrame]
+        if split_by_sweep and sweep_col in working.columns and working[sweep_col].nunique() > 1:
+            groups = [sub.copy() for _, sub in working.groupby(sweep_col, sort=True)]
+        else:
+            groups = [working]
+
+        for group in groups:
+            series = group[[freq_col, value_col]].copy()
+            series[freq_col] = pd.to_numeric(series[freq_col], errors="coerce")
+            series[value_col] = pd.to_numeric(series[value_col], errors="coerce")
+            series = series.loc[
+                np.isfinite(series[freq_col]) & np.isfinite(series[value_col])
+            ].copy()
+            if series.empty or series[freq_col].nunique() < _RECOMMENDATION_ROLLING_WINDOW:
+                continue
+
+            series = (
+                series.groupby(freq_col, as_index=False)[value_col]
+                .mean()
+                .sort_values(freq_col)
+                .reset_index(drop=True)
+            )
+            if len(series) >= _RECOMMENDATION_ROLLING_WINDOW:
+                overlay_series.append(series)
+
+    return overlay_series
+
+
+def _average_overlay_series(
+    overlay_series: list[pd.DataFrame],
+    *,
+    value_col: str,
+    freq_col: str,
+    bin_hz: float,
+) -> pd.DataFrame:
+    """Average several overlaid series onto one common frequency grid."""
+    if len(overlay_series) < 2:
+        return pd.DataFrame()
+
+    binned_series: list[pd.DataFrame] = []
+    all_freqs: list[float] = []
+    for series in overlay_series:
+        try:
+            binned = bin_by_frequency(
+                series,
+                value_col=value_col,
+                freq_col=freq_col,
+                bin_hz=bin_hz,
+                exclude_frequency_holds=False,
+            )
+        except ValueError:
+            continue
+        if binned.empty:
+            continue
+        binned_series.append(binned)
+        all_freqs.extend(binned["freq_center"].tolist())
+
+    if len(binned_series) < 2 or not all_freqs:
+        return pd.DataFrame()
+
+    fmin, fmax = min(all_freqs), max(all_freqs)
+    if fmax <= fmin:
+        return pd.DataFrame()
+
+    edges = np.arange(fmin, fmax + bin_hz, bin_hz)
+    if len(edges) < 2:
+        return pd.DataFrame()
+    centers = (edges[:-1] + edges[1:]) / 2.0
+
+    avg_vals: list[float] = []
+    std_vals: list[float] = []
+    half = bin_hz / 2.0
+    for center in centers:
+        vals: list[float] = []
+        for binned in binned_series:
+            mask = (
+                (binned["freq_center"] >= center - half)
+                & (binned["freq_center"] < center + half)
+            )
+            matched = binned.loc[mask, "mean"]
+            if not matched.empty:
+                vals.append(float(matched.mean()))
+        if vals:
+            avg_vals.append(float(np.mean(vals)))
+            std_vals.append(float(np.std(vals)) if len(vals) > 1 else 0.0)
+        else:
+            avg_vals.append(np.nan)
+            std_vals.append(np.nan)
+
+    return (
+        pd.DataFrame({"freq_center": centers, "mean": avg_vals, "std": std_vals})
+        .dropna()
+        .reset_index(drop=True)
+    )
+
+
+def _recommend_bin_for_series(
+    overlay_series: list[pd.DataFrame],
+    *,
+    value_col: str,
+    freq_col: str,
+    min_bin_hz: float,
+    max_bin_hz: float,
+    step_hz: float,
+) -> dict[str, float] | None:
+    """Pick the smallest bin width that removes isolated mismatch jumps."""
+    if len(overlay_series) < 2:
+        return None
+
+    pooled_values = pd.concat(
+        [series[value_col] for series in overlay_series],
+        ignore_index=True,
+    )
+    if pooled_values.empty:
+        return None
+
+    signal_span = float(
+        np.nanpercentile(pooled_values, 95) - np.nanpercentile(pooled_values, 5)
+    )
+    target_rolling_std = max(
+        1.0,
+        signal_span * _RECOMMENDATION_ROLLING_STD_TARGET_FRACTION,
+    )
+    target_isolated_jump = max(
+        1.0,
+        signal_span * _RECOMMENDATION_ISOLATED_JUMP_TARGET_FRACTION,
+    )
+
+    best_candidate: dict[str, float] | None = None
+    for candidate in np.arange(min_bin_hz, max_bin_hz + (step_hz / 2.0), step_hz):
+        candidate = float(round(candidate, 6))
+        avg_df = _average_overlay_series(
+            overlay_series,
+            value_col=value_col,
+            freq_col=freq_col,
+            bin_hz=candidate,
+        )
+        if len(avg_df) < _RECOMMENDATION_ROLLING_WINDOW:
+            continue
+
+        rolling_std = (
+            avg_df["mean"]
+            .rolling(
+                window=_RECOMMENDATION_ROLLING_WINDOW,
+                min_periods=_RECOMMENDATION_ROLLING_WINDOW,
+            )
+            .std()
+            .dropna()
+        )
+        if rolling_std.empty:
+            continue
+
+        roughness = float(
+            np.nanpercentile(rolling_std, _RECOMMENDATION_ROUGHNESS_PERCENTILE)
+        )
+        mean_values = avg_df["mean"].to_numpy(dtype=float)
+        centered_residual = np.abs(
+            mean_values[1:-1]
+            - ((mean_values[:-2] + mean_values[2:]) / 2.0)
+        )
+        left_step = mean_values[1:-1] - mean_values[:-2]
+        right_step = mean_values[2:] - mean_values[1:-1]
+        reversal_mask = (left_step * right_step) < 0
+        residual_baseline = (
+            float(np.nanmedian(centered_residual))
+            if centered_residual.size
+            else 0.0
+        )
+        isolated_jump_cutoff = max(
+            target_isolated_jump,
+            residual_baseline * _RECOMMENDATION_ISOLATED_JUMP_RATIO,
+        )
+        isolated_jump_mask = reversal_mask & (centered_residual > isolated_jump_cutoff)
+        isolated_jump_count = int(np.sum(isolated_jump_mask))
+        isolated_jump_residual = (
+            float(np.max(centered_residual[isolated_jump_mask]))
+            if isolated_jump_count
+            else (
+                float(np.max(centered_residual))
+                if centered_residual.size
+                else 0.0
+            )
+        )
+        isolated_jump_score = (
+            float(isolated_jump_count)
+            + float(
+                np.maximum(
+                    (centered_residual[isolated_jump_mask] / isolated_jump_cutoff) - 1.0,
+                    0.0,
+                ).sum()
+            )
+            if isolated_jump_count
+            else 0.0
+        )
+        score = (
+            isolated_jump_score
+            + max(0.0, (roughness / target_rolling_std) - 1.0)
+            + _RECOMMENDATION_BIN_WIDTH_PENALTY * (candidate / max_bin_hz)
+        )
+        candidate_result = {
+            "bin_hz": candidate,
+            "rolling_std": roughness,
+            "target_rolling_std": float(target_rolling_std),
+            "isolated_jump_residual": float(isolated_jump_residual),
+            "target_isolated_jump_residual": float(target_isolated_jump),
+            "isolated_jump_count": float(isolated_jump_count),
+            "series_count": float(len(overlay_series)),
+            "score": float(score),
+        }
+        if best_candidate is None or candidate_result["score"] < best_candidate["score"]:
+            best_candidate = candidate_result
+        if (
+            isolated_jump_count == 0
+            and roughness <= target_rolling_std
+        ):
+            return candidate_result
+
+    if best_candidate is None:
+        return None
+    return best_candidate
+
+
 def recommend_frequency_bin_widths(
     sweep_frames: list[pd.DataFrame] | dict[str, pd.DataFrame],
     *,
+    value_col: str | None = None,
     freq_col: str = "Frequency",
     sweep_col: str = "Sweep",
     min_bin_hz: float = 0.5,
     max_bin_hz: float = 100.0,
     step_hz: float = 0.5,
 ) -> dict[str, float]:
-    """Recommend smoothing-oriented frequency bin widths for sweep comparison.
+    """Recommend bin widths for overlaid sweep/test averages.
 
-    The heuristic is intentionally conservative: it measures the dominant
-    frequency spacing inside the sweeps and the spread of where individual
-    sweeps begin. The returned widths are then rounded to the UI step size.
-
-    Returns
-    -------
-    dict[str, float]
-        Keys:
-        - ``test_bin_hz``: good starting width for per-test binning.
-        - ``average_bin_hz``: slightly wider width for cross-test averages.
-        - ``typical_step_hz``: median positive frequency spacing observed.
-        - ``start_spread_hz``: robust spread of sweep start frequencies.
+    The scoring rule prefers the smallest bin width that removes isolated
+    one-bin jump artifacts on the averaged curve while also keeping the
+    5-point rolling standard deviation below a target tied to the signal
+    range. Wider bins are explicitly penalized to avoid unnecessary loss
+    of frequency detail.
     """
     if isinstance(sweep_frames, dict):
         frames = list(sweep_frames.values())
     else:
         frames = list(sweep_frames)
+
+    resolved_value_col = _infer_recommendation_value_col(frames, value_col)
 
     def _snap(value: float) -> float:
         return round(max(min_bin_hz, min(max_bin_hz, value)) / step_hz) * step_hz
@@ -604,7 +977,13 @@ def recommend_frequency_bin_widths(
         if frame.empty or freq_col not in frame.columns:
             continue
 
-        freqs = pd.to_numeric(frame[freq_col], errors="coerce").to_numpy(dtype=float)
+        working = frame.copy()
+        if "IsFrequencyHold" in working.columns:
+            working = working.loc[~working["IsFrequencyHold"]].copy()
+        if working.empty:
+            continue
+
+        freqs = pd.to_numeric(working[freq_col], errors="coerce").to_numpy(dtype=float)
         freqs = freqs[np.isfinite(freqs)]
         if freqs.size == 0:
             continue
@@ -616,9 +995,9 @@ def recommend_frequency_bin_widths(
             if diffs.size:
                 positive_steps.extend(diffs.tolist())
 
-        if sweep_col in frame.columns:
+        if sweep_col in working.columns:
             starts = (
-                frame.groupby(sweep_col, sort=True)[freq_col]
+                working.groupby(sweep_col, sort=True)[freq_col]
                 .first()
                 .pipe(pd.to_numeric, errors="coerce")
                 .dropna()
@@ -651,20 +1030,66 @@ def recommend_frequency_bin_widths(
         else 0.0
     )
 
-    test_bin_hz = _snap(
-        max(
-            typical_step_hz,
-            start_alignment_gap_hz + step_hz,
-            min_bin_hz,
+    fallback_bin_hz = _snap(max(min_bin_hz, step_hz))
+    test_series = (
+        _extract_overlay_series(
+            frames,
+            value_col=resolved_value_col,
+            freq_col=freq_col,
+            sweep_col=sweep_col,
+            split_by_sweep=True,
         )
+        if resolved_value_col
+        else []
     )
-    average_bin_hz = _snap(
-        max(
-            test_bin_hz,
-            start_alignment_gap_hz + (2.0 * step_hz),
-            typical_step_hz * 2.0,
+    average_series = (
+        _extract_overlay_series(
+            frames,
+            value_col=resolved_value_col,
+            freq_col=freq_col,
+            sweep_col=sweep_col,
+            split_by_sweep=False,
         )
+        if resolved_value_col
+        else []
     )
+
+    test_reco = (
+        _recommend_bin_for_series(
+            test_series,
+            value_col=resolved_value_col,
+            freq_col=freq_col,
+            min_bin_hz=min_bin_hz,
+            max_bin_hz=max_bin_hz,
+            step_hz=step_hz,
+        )
+        if resolved_value_col
+        else None
+    )
+    average_reco = (
+        _recommend_bin_for_series(
+            average_series,
+            value_col=resolved_value_col,
+            freq_col=freq_col,
+            min_bin_hz=min_bin_hz,
+            max_bin_hz=max_bin_hz,
+            step_hz=step_hz,
+        )
+        if resolved_value_col
+        else None
+    )
+
+    test_bin_hz = (
+        float(_snap(test_reco["bin_hz"]))
+        if test_reco is not None
+        else float(fallback_bin_hz)
+    )
+    average_bin_hz = (
+        float(_snap(average_reco["bin_hz"]))
+        if average_reco is not None
+        else float(test_bin_hz)
+    )
+    average_bin_hz = float(max(test_bin_hz, average_bin_hz))
 
     return {
         "test_bin_hz": float(max(min_bin_hz, min(max_bin_hz, test_bin_hz))),
@@ -672,6 +1097,38 @@ def recommend_frequency_bin_widths(
         "typical_step_hz": float(typical_step_hz),
         "start_alignment_gap_hz": float(start_alignment_gap_hz),
         "start_spread_hz": float(start_spread_hz),
+        "test_series_count": float(len(test_series)),
+        "average_series_count": float(len(average_series)),
+        "test_target_rolling_std": float(
+            test_reco["target_rolling_std"] if test_reco is not None else 0.0
+        ),
+        "average_target_rolling_std": float(
+            average_reco["target_rolling_std"] if average_reco is not None else 0.0
+        ),
+        "test_rolling_std": float(
+            test_reco["rolling_std"] if test_reco is not None else 0.0
+        ),
+        "average_rolling_std": float(
+            average_reco["rolling_std"] if average_reco is not None else 0.0
+        ),
+        "test_isolated_jump_residual": float(
+            test_reco["isolated_jump_residual"] if test_reco is not None else 0.0
+        ),
+        "average_isolated_jump_residual": float(
+            average_reco["isolated_jump_residual"] if average_reco is not None else 0.0
+        ),
+        "test_target_isolated_jump_residual": float(
+            test_reco["target_isolated_jump_residual"] if test_reco is not None else 0.0
+        ),
+        "average_target_isolated_jump_residual": float(
+            average_reco["target_isolated_jump_residual"] if average_reco is not None else 0.0
+        ),
+        "test_isolated_jump_count": float(
+            test_reco["isolated_jump_count"] if test_reco is not None else 0.0
+        ),
+        "average_isolated_jump_count": float(
+            average_reco["isolated_jump_count"] if average_reco is not None else 0.0
+        ),
     }
 
 
@@ -681,18 +1138,36 @@ def explain_frequency_bin_recommendation(
     include_average_bin: bool = True,
 ) -> str:
     """Format a human-readable explanation of the bin recommendation."""
-    text = (
-        f"Typical frequency step = {recommendation['typical_step_hz']:.1f} Hz; "
-        f"largest start-point offset = {recommendation['start_alignment_gap_hz']:.1f} Hz; "
-        f"sweep-start spread = {recommendation['start_spread_hz']:.1f} Hz; "
-        f"recommended test bin = {recommendation['test_bin_hz']:.1f} Hz"
-    )
-    if include_average_bin:
-        text += (
-            f"; recommended average bin = "
-            f"{recommendation['average_bin_hz']:.1f} Hz"
+    parts = [f"typical frequency step = {recommendation['typical_step_hz']:.1f} Hz"]
+
+    test_series_count = int(recommendation.get("test_series_count", 0))
+    if test_series_count >= 2:
+        parts.append(
+            f"{test_series_count} overlaid sweep/test series; "
+            f"isolated jump count = {recommendation.get('test_isolated_jump_count', 0.0):.0f}; "
+            f"5-point roughness = {recommendation.get('test_rolling_std', 0.0):.1f} "
+            f"target {recommendation.get('test_target_rolling_std', 0.0):.1f} µL/min; "
+            f"recommended plot bin = {recommendation['test_bin_hz']:.1f} Hz"
         )
-    return text + "."
+    else:
+        parts.append(f"recommended plot bin = {recommendation['test_bin_hz']:.1f} Hz")
+
+    if include_average_bin:
+        average_series_count = int(recommendation.get("average_series_count", 0))
+        if average_series_count >= 2:
+            parts.append(
+                f"{average_series_count} overlaid test series for averaging; "
+                f"isolated jump count = {recommendation.get('average_isolated_jump_count', 0.0):.0f}; "
+                f"5-point roughness = {recommendation.get('average_rolling_std', 0.0):.1f} "
+                f"target {recommendation.get('average_target_rolling_std', 0.0):.1f} µL/min; "
+                f"recommended average bin = {recommendation['average_bin_hz']:.1f} Hz"
+            )
+        else:
+            parts.append(
+                f"recommended average bin = {recommendation['average_bin_hz']:.1f} Hz"
+            )
+
+    return "; ".join(parts) + "."
 
 
 def format_bin_choice_label(
@@ -711,6 +1186,51 @@ def format_bin_choice_label(
         else:
             label += f" · recommended Δf = {recommended:g} Hz"
     return label
+
+
+def summarize_frequency_holds(
+    sweep_df: pd.DataFrame,
+    *,
+    signal_col: str,
+) -> pd.DataFrame:
+    """Summarize constant-frequency hold segments removed from sweep plots."""
+    if (
+        sweep_df.empty
+        or "IsFrequencyHold" not in sweep_df.columns
+        or not sweep_df["IsFrequencyHold"].any()
+        or "FrequencyRunId" not in sweep_df.columns
+        or signal_col not in sweep_df.columns
+    ):
+        return pd.DataFrame()
+
+    hold_df = sweep_df.loc[sweep_df["IsFrequencyHold"]].copy()
+    summary = (
+        hold_df.groupby("FrequencyRunId", sort=True)
+        .agg(
+            sweep=("Sweep", "first"),
+            frequency_hz=("Frequency", "first"),
+            points=("FrequencyRunPoints", "first"),
+            start_s=("Elapsed_s", "min"),
+            end_s=("Elapsed_s", "max"),
+            mean_signal=(signal_col, "mean"),
+            std_signal=(signal_col, "std"),
+        )
+        .reset_index(drop=True)
+    )
+    summary["duration_s"] = summary["end_s"] - summary["start_s"]
+    summary["std_signal"] = summary["std_signal"].fillna(0)
+    return summary.rename(
+        columns={
+            "sweep": "Sweep",
+            "frequency_hz": "Frequency (Hz)",
+            "points": "Points",
+            "start_s": "Start (s)",
+            "end_s": "End (s)",
+            "duration_s": "Duration (s)",
+            "mean_signal": f"Mean {signal_col}",
+            "std_signal": f"Std {signal_col}",
+        }
+    )
 
 
 def compute_frequency_average(

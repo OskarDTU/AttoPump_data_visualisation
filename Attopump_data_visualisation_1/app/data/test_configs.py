@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Literal
 
 _CONFIG_PATH = Path(__file__).parent / "test_configs.json"
+_config_cache: dict[str, "TestConfig"] | None = None
+_config_cache_signature: tuple[str, int, int] | None = None
 
 
 # ── Dataclass ──────────────────────────────────────────────────────────────
@@ -77,6 +79,14 @@ def _write_raw(data: dict) -> None:
         json.dump(data, f, indent=2)
 
 
+def config_storage_signature() -> tuple[str, int, int]:
+    """Return a cheap signature that changes when the config file changes."""
+    if not _CONFIG_PATH.exists():
+        return (str(_CONFIG_PATH), 0, 0)
+    stat = _CONFIG_PATH.stat()
+    return (str(_CONFIG_PATH), int(stat.st_mtime_ns), int(stat.st_size))
+
+
 def load_test_configs() -> dict[str, TestConfig]:
     """Load all saved test configurations.
 
@@ -85,6 +95,13 @@ def load_test_configs() -> dict[str, TestConfig]:
     dict[str, TestConfig]
         Mapping from folder name → ``TestConfig``.
     """
+    global _config_cache
+    global _config_cache_signature
+
+    signature = config_storage_signature()
+    if _config_cache is not None and _config_cache_signature == signature:
+        return _config_cache
+
     raw = _read_raw()
     configs: dict[str, TestConfig] = {}
     for folder, entry in raw.get("tests", {}).items():
@@ -99,6 +116,8 @@ def load_test_configs() -> dict[str, TestConfig]:
             )
         except Exception:
             continue  # skip malformed entries silently
+    _config_cache = configs
+    _config_cache_signature = signature
     return configs
 
 
@@ -109,15 +128,25 @@ def get_test_config(folder_name: str) -> TestConfig | None:
 
 def save_test_config(folder_name: str, config: TestConfig) -> None:
     """Upsert a test configuration for *folder_name*."""
+    global _config_cache
+    global _config_cache_signature
+
     raw = _read_raw()
     raw.setdefault("tests", {})[folder_name] = asdict(config)
     _write_raw(raw)
+    _config_cache = None
+    _config_cache_signature = None
 
 
 def delete_test_config(folder_name: str) -> bool:
     """Remove the config for *folder_name*.  Returns True if it existed."""
+    global _config_cache
+    global _config_cache_signature
+
     raw = _read_raw()
     removed = raw.get("tests", {}).pop(folder_name, None) is not None
     if removed:
         _write_raw(raw)
+        _config_cache = None
+        _config_cache_signature = None
     return removed
