@@ -31,6 +31,7 @@ from ..data.pump_registry import (
     remove_pump,
     remove_shipment,
     remove_sub_group,
+    registry_storage_signature,
     remove_test_group,
     save_registry,
     sync_pumps_from_experiment_log,
@@ -43,13 +44,20 @@ from ..data.pump_registry import (
 
 def _get_registry() -> PumpRegistry:
     key = "_pump_registry"
-    if key not in st.session_state:
+    sig_key = "_pump_registry_signature"
+    current_sig = registry_storage_signature()
+    if (
+        key not in st.session_state
+        or st.session_state.get(sig_key) != current_sig
+    ):
         st.session_state[key] = migrate_legacy_files()
+        st.session_state[sig_key] = registry_storage_signature()
     return st.session_state[key]
 
 
 def _persist() -> None:
     save_registry(_get_registry())
+    st.session_state["_pump_registry_signature"] = registry_storage_signature()
 
 
 def _auto_sync_registry(

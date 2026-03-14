@@ -89,5 +89,109 @@
       "description": "Japan set 1 - failed"
     },
     "author": "user"
+  },
+  {
+    "timestamp": "2026-03-13T10:27:15+00:00",
+    "action": "add_sub_group",
+    "target": "PUMP 270226-1",
+    "details": {
+      "group": "Japan set 1 - missing constant freq. test",
+      "previous_name": "Japan set 1 - missing constant freq. test",
+      "tests": [
+        "20260306-1155-1Hz_1500H_Hz_1_seconds",
+        "20260306-1329-1Hz_1500H_Hz_500_seconds",
+        "20260306-1357-300Hz_1000H_Hz_10_seconds",
+        "20260306-1408-300Hz_1000H_Hz_5_seconds",
+        "20260306-1415-300Hz_1000H_Hz_1_seconds",
+        "20260306-1422-1Hz_1500H_Hz_500_seconds"
+      ],
+      "description": "These are 5 tests that seek to characterise the pump before shipment to Japan. No constant frequency test was performed in this set."
+    },
+    "author": "user"
+  },
+  {
+    "timestamp": "2026-03-13T10:27:33+00:00",
+    "action": "add_sub_group",
+    "target": "PUMP 270226-4",
+    "details": {
+      "group": "Japan test set",
+      "previous_name": "Japan test set",
+      "tests": [
+        "20260312-1607-1Hz_1500H_Hz_1_seconds",
+        "20260312-1614-1Hz_1500H_Hz_500_seconds",
+        "20260312-1634-500Hz-Pump-20260227-4"
+      ],
+      "description": ""
+    },
+    "author": "user"
+  },
+  {
+    "timestamp": "2026-03-13T17:46:05+00:00",
+    "action": "add_sub_group",
+    "target": "PUMP 270226-1",
+    "details": {
+      "group": "Japan set 2 - including constant freq. test",
+      "previous_name": "Japan set 2 - including constant freq. test",
+      "tests": [],
+      "description": ""
+    },
+    "author": "user"
+  },
+  {
+    "timestamp": "2026-03-13T17:46:20+00:00",
+    "action": "remove_sub_group",
+    "target": "PUMP 270226-1",
+    "details": {
+      "group": "Japan set 2 - including constant freq. test"
+    },
+    "author": "user"
+  },
+  {
+    "timestamp": "2026-03-13T17:46:55+00:00",
+    "action": "add_sub_group",
+    "target": "PUMP 270226-1",
+    "details": {
+      "group": "Japan set 2 - including constant freq",
+      "previous_name": "Japan set 2 - including constant freq",
+      "tests": [
+        "20260313-1656-500Hz",
+        "20260313-161148-1Hz_1500H_Hz_500_seconds",
+        "20260313-1611-1Hz_1500H_Hz_1_seconds"
+      ],
+      "description": ""
+    },
+    "author": "user"
+  },
+  {
+    "timestamp": "2026-03-14T08:54:07+00:00",
+    "action": "add_sub_group",
+    "target": "PUMP 270226-1",
+    "details": {
+      "group": "Japan set 3 - final",
+      "previous_name": "Japan set 3 - final",
+      "tests": [
+        "20260313-1904-1Hz_1500H_Hz_1_seconds",
+        "20260313-1906-500Hz",
+        "20260313-1917-1Hz_1500H_Hz_500_seconds"
+      ],
+      "description": "The pump wasn't performing as hoped for, so Nicolas took it apart and rebuilt it. These are tests from the rebuild"
+    },
+    "author": "user"
+  },
+  {
+    "timestamp": "2026-03-14T08:55:35+00:00",
+    "action": "add_sub_group",
+    "target": "Pump 020326",
+    "details": {
+      "group": "Japan set 1",
+      "previous_name": "Japan set 1",
+      "tests": [
+        "20260313-1001-1Hz_1500H_Hz_1_seconds",
+        "20260313-1005-1Hz_1500H_Hz_500_seconds",
+        "20260313-1045-500Hz"
+      ],
+      "description": "Set of tests for Japan."
+    },
+    "author": "user"
   }
 ]

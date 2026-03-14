@@ -1,7 +1,7 @@
 """Streamlit multipage entry point for AttoPump data visualization.
 
 Run with:
-    ./run_app.sh          (from repo root)
+    ./run_app.sh           (from repo root)
     uv run streamlit run streamlit_app.py   (manual)
 
 Pages:

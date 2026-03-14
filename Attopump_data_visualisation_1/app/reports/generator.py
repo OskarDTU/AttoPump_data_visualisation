@@ -60,6 +60,18 @@ class ReportSection:
     title: str = ""
     content: Any = None
     description: str = ""
+    collapsible: bool = False
+    collapsed: bool = False
+
+
+@dataclass
+class AxisBounds:
+    """Optional manual axis limits for one figure family."""
+
+    x_min: float | None = None
+    x_max: float | None = None
+    y_min: float | None = None
+    y_max: float | None = None
 
 
 @dataclass
@@ -84,15 +96,47 @@ class ReportDefinition:
     notes : str
         Free-text notes included in the report header.
     bin_hz : float
-        Frequency bin width for sweep analysis.
+        Per-test frequency bin width for sweep analysis.
+    avg_bin_hz : float
+        Cross-test / cross-target averaging bin width.
     show_error_bars : bool
-        Whether to include ±1 std bands on plots.
+        Whether to include ±1 std error bars on plots.
     show_individual_tests : bool
         Whether to show per-test lines behind bar averages.
     show_raw_all_sweeps : bool
         Whether to include the raw all-sweeps layer for individual sweep tests.
+    plot_mode : str
+        Legacy fallback curve rendering style for compatible report plots.
+    plot_modes : dict[str, str]
+        Optional per-plot-family curve rendering styles.
+    marker_size : int
+        Default marker size for compatible report plots.
+    opacity : float
+        Default trace opacity for raw-point and time-series plots.
+    max_raw_points : int
+        Per-test cap for raw-point plots in the exported report.
+    mean_threshold_pct : int
+        High-flow retention percentage for best-region analysis.
+    std_threshold_pct : int
+        Low-variability retention percentage within the high-flow subset.
+    sweep_axis : AxisBounds
+        Manual axis overrides for frequency-vs-flow plots.
+    relative_axis : AxisBounds
+        Manual axis overrides for relative sweep plots.
+    time_axis : AxisBounds
+        Manual axis overrides for time-series plots.
+    variability_axis : AxisBounds
+        Manual axis overrides for mean-vs-std plots.
     selection_mode : str
         ``"pumps"`` or ``"sub_groups"``.
+    overlay_entry_ids : list[str]
+        Selected report-target IDs included in the all-tests overlay view.
+    auto_use_recommended_avg_bin : bool
+        Whether average-style plots should automatically use the recommended
+        averaging bin when available.
+    overlay_include_sweep_drilldown : bool
+        Whether the report should include per-target all-sweeps drill-down
+        plots for the focused overlay targets.
     """
 
     title: str = "AttoPump Test Report"
@@ -103,25 +147,40 @@ class ReportDefinition:
     ])
     notes: str = ""
     bin_hz: float = 5.0
+    avg_bin_hz: float = 3.0
     show_error_bars: bool = True
     show_individual_tests: bool = False
     show_raw_all_sweeps: bool = True
+    plot_mode: str = "lines+markers"
+    plot_modes: dict[str, str] = field(default_factory=dict)
+    marker_size: int = 6
+    opacity: float = 0.8
+    max_raw_points: int = 50_000
+    mean_threshold_pct: int = 75
+    std_threshold_pct: int = 10
+    sweep_axis: AxisBounds = field(default_factory=AxisBounds)
+    relative_axis: AxisBounds = field(default_factory=AxisBounds)
+    time_axis: AxisBounds = field(default_factory=AxisBounds)
+    variability_axis: AxisBounds = field(default_factory=AxisBounds)
     selection_mode: str = "pumps"
+    overlay_entry_ids: list[str] = field(default_factory=list)
+    auto_use_recommended_avg_bin: bool = True
+    overlay_include_sweep_drilldown: bool = False
 
 
 # Available comparison types with labels
 COMPARISON_OPTIONS: dict[str, str] = {
-    "sweep_overlay": "📈 Sweep overlay (mean ± std per entry)",
-    "sweep_relative": "📉 Relative sweep (0–100 %)",
+    "sweep_overlay": "📈 Sweep overlay (entries and tests)",
+    "sweep_relative": "📉 Relative sweep comparison (0–100 %)",
     "individual_sweeps": "📊 Individual sweep diagnostics",
     "global_average": "📏 Global average curve",
     "boxplots": "📦 Flow distribution boxplots",
     "histograms": "📊 Flow histograms",
     "summary_table": "📋 Summary statistics table",
     "constant_time_series": "⏱️ Constant flow vs time",
-    "raw_points": "⚡ All raw data points",
+    "raw_points": "⚡ All raw sweep points",
     "std_vs_mean": "📐 Std vs Mean scatter",
-    "best_region": "🎯 Best operating region",
+    "best_region": "🎯 Best-region analysis (high mean, low std)",
     "correlation": "🔗 Inter-test correlation heatmap",
 }
 
@@ -157,10 +216,25 @@ def save_report_definition(name: str, defn: ReportDefinition) -> None:
         "comparisons": defn.comparisons,
         "notes": defn.notes,
         "bin_hz": defn.bin_hz,
+        "avg_bin_hz": defn.avg_bin_hz,
         "show_error_bars": defn.show_error_bars,
         "show_individual_tests": defn.show_individual_tests,
         "show_raw_all_sweeps": defn.show_raw_all_sweeps,
+        "plot_mode": defn.plot_mode,
+        "plot_modes": defn.plot_modes,
+        "marker_size": defn.marker_size,
+        "opacity": defn.opacity,
+        "max_raw_points": defn.max_raw_points,
+        "mean_threshold_pct": defn.mean_threshold_pct,
+        "std_threshold_pct": defn.std_threshold_pct,
+        "sweep_axis": asdict(defn.sweep_axis),
+        "relative_axis": asdict(defn.relative_axis),
+        "time_axis": asdict(defn.time_axis),
+        "variability_axis": asdict(defn.variability_axis),
         "selection_mode": defn.selection_mode,
+        "overlay_entry_ids": defn.overlay_entry_ids,
+        "auto_use_recommended_avg_bin": defn.auto_use_recommended_avg_bin,
+        "overlay_include_sweep_drilldown": defn.overlay_include_sweep_drilldown,
         "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     with open(_REPORTS_PATH, "w") as f:
@@ -184,6 +258,18 @@ def load_report_definition(name: str) -> ReportDefinition | None:
     d = reports.get(name)
     if d is None:
         return None
+
+    def _load_axis_bounds(key: str) -> AxisBounds:
+        raw = d.get(key, {})
+        if not isinstance(raw, dict):
+            return AxisBounds()
+        return AxisBounds(
+            x_min=raw.get("x_min"),
+            x_max=raw.get("x_max"),
+            y_min=raw.get("y_min"),
+            y_max=raw.get("y_max"),
+        )
+
     return ReportDefinition(
         title=d.get("title", name),
         author=d.get("author", ""),
@@ -191,10 +277,29 @@ def load_report_definition(name: str) -> ReportDefinition | None:
         comparisons=d.get("comparisons", []),
         notes=d.get("notes", ""),
         bin_hz=d.get("bin_hz", 5.0),
+        avg_bin_hz=d.get("avg_bin_hz", 3.0),
         show_error_bars=d.get("show_error_bars", True),
         show_individual_tests=d.get("show_individual_tests", False),
         show_raw_all_sweeps=d.get("show_raw_all_sweeps", True),
+        plot_mode=d.get("plot_mode", "lines+markers"),
+        plot_modes=(
+            d.get("plot_modes", {})
+            if isinstance(d.get("plot_modes", {}), dict)
+            else {}
+        ),
+        marker_size=d.get("marker_size", 6),
+        opacity=d.get("opacity", 0.8),
+        max_raw_points=d.get("max_raw_points", 50_000),
+        mean_threshold_pct=d.get("mean_threshold_pct", 75),
+        std_threshold_pct=d.get("std_threshold_pct", 10),
+        sweep_axis=_load_axis_bounds("sweep_axis"),
+        relative_axis=_load_axis_bounds("relative_axis"),
+        time_axis=_load_axis_bounds("time_axis"),
+        variability_axis=_load_axis_bounds("variability_axis"),
         selection_mode=d.get("selection_mode", "pumps"),
+        overlay_entry_ids=d.get("overlay_entry_ids", []),
+        auto_use_recommended_avg_bin=d.get("auto_use_recommended_avg_bin", True),
+        overlay_include_sweep_drilldown=d.get("overlay_include_sweep_drilldown", False),
     )
 
 
@@ -234,6 +339,31 @@ def _escape(text: str) -> str:
     return html_mod.escape(text)
 
 
+def _split_section_description(description: str) -> tuple[str, str]:
+    """Split a long section note into a visible subtitle and hidden detail."""
+    paragraphs = [part.strip() for part in str(description or "").split("\n\n") if part.strip()]
+    if not paragraphs:
+        return "", ""
+
+    priority_prefixes = (
+        "What you are seeing:",
+        "Tabulated",
+        "Summary:",
+        "What this table shows:",
+    )
+    subtitle_index = next(
+        (
+            idx
+            for idx, paragraph in enumerate(paragraphs)
+            if paragraph.startswith(priority_prefixes)
+        ),
+        0,
+    )
+    subtitle = paragraphs.pop(subtitle_index)
+    details = "\n\n".join(paragraphs)
+    return subtitle, details
+
+
 _CSS = """
 <style>
   :root {
@@ -254,7 +384,7 @@ _CSS = """
     line-height: 1.6;
   }
   .report-container {
-    max-width: 1200px;
+    max-width: 1500px;
     margin: 0 auto;
     padding: 40px 24px;
   }
@@ -293,11 +423,38 @@ _CSS = """
     color: var(--fg);
     margin: 20px 0 10px 0;
   }
+  .section-subtitle {
+    color: #364152;
+    font-size: 0.98em;
+    margin: -4px 0 14px 0;
+    max-width: 980px;
+  }
   .section-description {
     color: var(--muted);
     font-size: 0.9em;
     margin-bottom: 12px;
     white-space: pre-line;
+  }
+  details.section-details,
+  details.section-table {
+    margin: 12px 0;
+    padding: 0;
+  }
+  details.section-details > summary,
+  details.section-table > summary {
+    cursor: pointer;
+    color: var(--accent);
+    font-weight: 600;
+    list-style: none;
+    margin-bottom: 10px;
+  }
+  details.section-details > summary::-webkit-details-marker,
+  details.section-table > summary::-webkit-details-marker {
+    display: none;
+  }
+  details.section-details[open] > summary,
+  details.section-table[open] > summary {
+    margin-bottom: 12px;
   }
   .report-table {
     width: 100%;
@@ -337,7 +494,7 @@ _CSS = """
   .badge-fail { background: #f8d7da; color: #721c24; }
   .badge-sweep { background: #cce5ff; color: #004085; }
   .badge-constant { background: #fff3cd; color: #856404; }
-  .plot-container { margin: 16px 0; }
+  .plot-container { margin: 16px 0; width: 100%; }
   .report-footer {
     border-top: 1px solid var(--border);
     margin-top: 40px;
@@ -463,9 +620,18 @@ def build_report_html(
             if sec.title:
                 parts.append(f"<h3>{_escape(sec.title)}</h3>")
             if sec.description:
-                parts.append(
-                    f'<div class="section-description">{_escape(sec.description)}</div>'
-                )
+                subtitle, details = _split_section_description(sec.description)
+                if subtitle:
+                    parts.append(
+                        f'<div class="section-subtitle">{_escape(subtitle)}</div>'
+                    )
+                if details:
+                    parts.append(
+                        "<details class='section-details'>"
+                        "<summary>More detail</summary>"
+                        f"<div class='section-description'>{_escape(details)}</div>"
+                        "</details>"
+                    )
             parts.append('<div class="plot-container">')
             parts.append(_fig_to_html(sec.content, include_js=first_plot))
             first_plot = False
@@ -474,10 +640,30 @@ def build_report_html(
             if sec.title:
                 parts.append(f"<h3>{_escape(sec.title)}</h3>")
             if sec.description:
+                subtitle, details = _split_section_description(sec.description)
+                if subtitle:
+                    parts.append(
+                        f'<div class="section-subtitle">{_escape(subtitle)}</div>'
+                    )
+                if details:
+                    parts.append(
+                        "<details class='section-details'>"
+                        "<summary>More detail</summary>"
+                        f"<div class='section-description'>{_escape(details)}</div>"
+                        "</details>"
+                    )
+            table_html = _df_to_html_table(sec.content)
+            if sec.collapsible:
+                summary_label = "Show table"
+                open_attr = "" if sec.collapsed else " open"
                 parts.append(
-                    f'<div class="section-description">{_escape(sec.description)}</div>'
+                    f"<details class='section-table'{open_attr}>"
+                    f"<summary>{summary_label}</summary>"
+                    f"{table_html}"
+                    "</details>"
                 )
-            parts.append(_df_to_html_table(sec.content))
+            else:
+                parts.append(table_html)
 
         parts.append("</div>")
 

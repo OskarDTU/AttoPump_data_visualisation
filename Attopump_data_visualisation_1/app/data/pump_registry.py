@@ -176,6 +176,15 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def registry_storage_signature() -> tuple[int, int]:
+    """Return a lightweight signature of the persisted registry file."""
+    try:
+        stat = _REGISTRY_PATH.stat()
+        return (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return (0, 0)
+
+
 def _append_audit(record: AuditRecord) -> None:
     log = _read_audit_log_raw()
     log.append(asdict(record))

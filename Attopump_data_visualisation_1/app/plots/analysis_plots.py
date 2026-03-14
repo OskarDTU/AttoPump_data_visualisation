@@ -44,11 +44,11 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 
 from ..data.config import PLOT_HEIGHT
-from .shared import PALETTE, color_to_rgba, flow_label
+from ..data.data_processor import bin_by_frequency
+from .shared import PALETTE, flow_label, std_error_bar_style
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -80,39 +80,17 @@ def plot_combined_overlay(
                 name=name,
                 line=dict(color=color, width=2),
                 marker=dict(size=marker_size),
+                error_y=(
+                    std_error_bar_style(
+                        binned["std"].fillna(0),
+                        color=color,
+                    )
+                    if show_error_bars and "std" in binned.columns
+                    else None
+                ),
                 legendgroup=name,
             )
         )
-
-        if show_error_bars and "std" in binned.columns:
-            upper = binned["mean"] + binned["std"].fillna(0)
-            lower = binned["mean"] - binned["std"].fillna(0)
-            fill_color = color_to_rgba(color, 0.15)
-
-            fig.add_trace(
-                go.Scatter(
-                    x=binned["freq_center"],
-                    y=upper,
-                    mode="lines",
-                    line=dict(width=0),
-                    showlegend=False,
-                    legendgroup=name,
-                    hoverinfo="skip",
-                )
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=binned["freq_center"],
-                    y=lower,
-                    mode="lines",
-                    line=dict(width=0),
-                    fill="tonexty",
-                    fillcolor=fill_color,
-                    showlegend=False,
-                    legendgroup=name,
-                    hoverinfo="skip",
-                )
-            )
 
     fig.update_layout(
         title=title,
@@ -149,7 +127,7 @@ def plot_global_average(
     Parameters
     ----------
     show_error_bars : bool
-        When *True* (default), draw a ±1 std shaded band around the mean.
+        When *True* (default), draw ±1 std error bars on the mean.
     """
     # Collect all frequency ranges
     all_freqs: list[float] = []
@@ -198,35 +176,16 @@ def plot_global_average(
             name="Global Mean",
             line=dict(color="blue", width=3),
             marker=dict(size=marker_size),
+            error_y=(
+                std_error_bar_style(
+                    avg_df["std"].fillna(0),
+                    color="blue",
+                )
+                if show_error_bars
+                else None
+            ),
         )
     )
-
-    upper = avg_df["mean"] + avg_df["std"]
-    lower = avg_df["mean"] - avg_df["std"]
-
-    if show_error_bars:
-        fig.add_trace(
-            go.Scatter(
-                x=avg_df["freq_center"],
-                y=upper,
-                mode="lines",
-                line=dict(width=0),
-                showlegend=False,
-                hoverinfo="skip",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=avg_df["freq_center"],
-                y=lower,
-                mode="lines",
-                line=dict(width=0),
-                fill="tonexty",
-                name="±1 std (inter-test)",
-                fillcolor="rgba(0, 100, 255, 0.2)",
-                hoverinfo="skip",
-            )
-        )
 
     fig.update_layout(
         title=title,
@@ -252,6 +211,7 @@ def plot_all_raw_points(
     signal_col: str = "flow",
     title: str = "All Raw Data Points",
     height: int = PLOT_HEIGHT,
+    mode: str = "markers",
     marker_size: int = 3,
     opacity: float = 0.5,
 ) -> go.Figure:
@@ -263,13 +223,18 @@ def plot_all_raw_points(
         df = test_raw[name]
         if freq_col not in df.columns or signal_col not in df.columns:
             continue
+        if "IsFrequencyHold" in df.columns:
+            df = df.loc[~df["IsFrequencyHold"]].copy()
+        if df.empty:
+            continue
         color = PALETTE[i % len(PALETTE)]
         fig.add_trace(
             go.Scattergl(
                 x=df[freq_col],
                 y=df[signal_col],
-                mode="markers",
+                mode=mode,
                 marker=dict(size=marker_size, color=color, opacity=opacity),
+                line=dict(color=color, width=1.2),
                 name=name,
             )
         )
@@ -445,16 +410,28 @@ def plot_std_vs_mean(
 
     scatter_df = pd.DataFrame({"Mean": means, "Std": stds, "Test": labels})
 
-    fig = px.scatter(
-        scatter_df,
-        x="Mean",
-        y="Std",
-        color="Test",
+    fig = go.Figure()
+    for i, (name, group) in enumerate(scatter_df.groupby("Test", sort=True)):
+        color = PALETTE[i % len(PALETTE)]
+        fig.add_trace(
+            go.Scattergl(
+                x=group["Mean"],
+                y=group["Std"],
+                mode="markers",
+                name=name,
+                marker=dict(size=marker_size, color=color),
+            )
+        )
+
+    fig.update_layout(
         title=title,
-        labels={"Mean": "Mean Flow (µL/min)", "Std": "Std Dev (µL/min)"},
-        render_mode="webgl",
+        height=height,
+        xaxis_title="Mean Flow (µL/min)",
+        yaxis_title="Std Dev (µL/min)",
+        dragmode="zoom",
+        font=dict(size=12),
+        margin=dict(l=20, r=20, t=50, b=20),
     )
-    fig.update_traces(marker=dict(size=marker_size))
 
     # Linear regression trend line
     m_arr = np.array(means, dtype=float)
@@ -527,18 +504,7 @@ def plot_stability_cloud(
     height: int = PLOT_HEIGHT,
     marker_size: int = 8,
 ) -> tuple[go.Figure, pd.DataFrame]:
-    """Find frequency bins with highest flow and lowest variability.
-
-    Method (from reference script):
-      1. Pool all binned data from all tests.
-      2. Top ``mean_threshold_pct`` % by mean  → *high-flow* set.
-      3. Within that, bottom ``std_threshold_pct`` % by std  → *high-stability* set.
-
-    Returns
-    -------
-    (fig, best_df)
-        ``best_df`` contains the green-star rows for downstream display.
-    """
+    """Highlight the best operating bins directly on flow-versus-frequency axes."""
     rows: list[dict] = []
     for name, binned in test_binned.items():
         for _, row in binned.iterrows():
@@ -570,68 +536,157 @@ def plot_stability_cloud(
         high_stability = high_flow[high_flow["std"] <= std_cutoff]
 
     fig = go.Figure()
-
-    # All points (grey)
-    hover = pool["test"] + " @ " + pool["freq_center"].round(1).astype(str) + " Hz"
-    fig.add_trace(
-        go.Scatter(
-            x=pool["mean"],
-            y=pool["std"],
-            mode="markers",
-            name="All bins",
-            marker=dict(size=max(1, marker_size - 2), color="lightgrey", opacity=0.5),
-            text=hover,
-            hoverinfo="text+x+y",
+    for i, (name, sub) in enumerate(pool.groupby("test", sort=True)):
+        sub = sub.sort_values("freq_center").reset_index(drop=True)
+        hover = (
+            sub["test"]
+            + " @ "
+            + sub["freq_center"].round(1).astype(str)
+            + " Hz"
+            + "<br>mean = "
+            + sub["mean"].round(1).astype(str)
+            + " µL/min"
+            + "<br>std = "
+            + sub["std"].round(1).astype(str)
+            + " µL/min"
         )
-    )
+        fig.add_trace(
+            go.Scatter(
+                x=sub["freq_center"],
+                y=sub["mean"],
+                mode="lines+markers",
+                name="All bins" if i == 0 else name,
+                showlegend=(i == 0),
+                marker=dict(
+                    size=max(1, marker_size - 3),
+                    color="lightgrey",
+                    opacity=0.45,
+                ),
+                line=dict(color="rgba(180, 180, 180, 0.45)", width=1.2),
+                error_y=std_error_bar_style(
+                    sub["std"].fillna(0),
+                    color="lightgrey",
+                    alpha=0.2,
+                    thickness=0.8,
+                    width=2.0,
+                ),
+                legendgroup="all_bins",
+                text=hover,
+                hovertemplate="%{text}<extra></extra>",
+            )
+        )
 
-    # High flow (orange)
     if not high_flow.empty:
         hover_hf = (
             high_flow["test"]
             + " @ "
             + high_flow["freq_center"].round(1).astype(str)
             + " Hz"
+            + "<br>mean = "
+            + high_flow["mean"].round(1).astype(str)
+            + " µL/min"
+            + "<br>std = "
+            + high_flow["std"].round(1).astype(str)
+            + " µL/min"
         )
         fig.add_trace(
             go.Scatter(
-                x=high_flow["mean"],
-                y=high_flow["std"],
+                x=high_flow["freq_center"],
+                y=high_flow["mean"],
                 mode="markers",
                 name=f"High flow (top {mean_threshold_pct:.0f} %)",
-                marker=dict(size=marker_size, color="orange", opacity=0.7),
+                marker=dict(size=marker_size, color="orange", opacity=0.75),
+                error_y=std_error_bar_style(
+                    high_flow["std"].fillna(0),
+                    color="orange",
+                    alpha=0.35,
+                    thickness=1.0,
+                    width=3.0,
+                ),
                 text=hover_hf,
-                hoverinfo="text+x+y",
+                hovertemplate="%{text}<extra></extra>",
             )
         )
 
-    # High stability (green stars)
     if not high_stability.empty:
+        high_stability = high_stability.sort_values(
+            ["std", "mean"],
+            ascending=[True, False],
+        ).reset_index(drop=True)
         hover_hs = (
             high_stability["test"]
             + " @ "
             + high_stability["freq_center"].round(1).astype(str)
             + " Hz"
+            + "<br>mean = "
+            + high_stability["mean"].round(1).astype(str)
+            + " µL/min"
+            + "<br>std = "
+            + high_stability["std"].round(1).astype(str)
+            + " µL/min"
         )
         fig.add_trace(
             go.Scatter(
-                x=high_stability["mean"],
-                y=high_stability["std"],
+                x=high_stability["freq_center"],
+                y=high_stability["mean"],
                 mode="markers",
-                name=f"High stability (bottom {std_threshold_pct:.0f} % std)",
+                name=f"Best-region bins (bottom {std_threshold_pct:.0f} % std)",
                 marker=dict(
-                    size=marker_size + 4, color="green", symbol="star", opacity=0.9
+                    size=marker_size + 4,
+                    color="green",
+                    symbol="star",
+                    opacity=0.95,
+                    line=dict(color="darkgreen", width=1.0),
+                ),
+                error_y=std_error_bar_style(
+                    high_stability["std"].fillna(0),
+                    color="green",
+                    alpha=0.45,
+                    thickness=1.1,
+                    width=3.0,
                 ),
                 text=hover_hs,
-                hoverinfo="text+x+y",
+                hovertemplate="%{text}<extra></extra>",
+            )
+        )
+
+        best_point = high_stability.iloc[0]
+        fig.add_trace(
+            go.Scatter(
+                x=[best_point["freq_center"]],
+                y=[best_point["mean"]],
+                mode="markers",
+                name=(
+                    f"Best point — {best_point['mean']:.1f} µL/min "
+                    f"±{best_point['std']:.1f} @ {best_point['freq_center']:.0f} Hz"
+                ),
+                marker=dict(
+                    size=marker_size + 8,
+                    color="#ffd54f",
+                    symbol="star",
+                    line=dict(color="red", width=2.0),
+                ),
+                error_y=std_error_bar_style(
+                    [best_point["std"]],
+                    color="red",
+                    alpha=0.6,
+                    thickness=1.2,
+                    width=4.0,
+                ),
+                hovertemplate=(
+                    f"{best_point['test']} @ {best_point['freq_center']:.1f} Hz"
+                    f"<br>mean = {best_point['mean']:.1f} µL/min"
+                    f"<br>std = {best_point['std']:.1f} µL/min"
+                    "<extra></extra>"
+                ),
             )
         )
 
     fig.update_layout(
         title=title,
         height=height,
-        xaxis_title="Mean Flow (µL/min)",
-        yaxis_title="Std Dev (µL/min)",
+        xaxis_title="Frequency (Hz)",
+        yaxis_title="Flow (µL/min)",
         hovermode="closest",
         dragmode="zoom",
         font=dict(size=12),
@@ -767,6 +822,8 @@ def plot_per_test_sweeps(
     sweeps = sorted(sweep_df["Sweep"].unique())
     for i, sw in enumerate(sweeps):
         sub = sweep_df[sweep_df["Sweep"] == sw]
+        if "IsFrequencyHold" in sub.columns:
+            sub = sub.loc[~sub["IsFrequencyHold"]].copy()
         if sub.empty:
             continue
 
@@ -808,6 +865,95 @@ def plot_per_test_sweeps(
                 marker=dict(size=marker_size),
             )
         )
+
+    fig.update_layout(
+        title=title,
+        height=height,
+        xaxis_title="Frequency (Hz)",
+        yaxis_title=flow_label(signal_col),
+        hovermode="x unified",
+        dragmode="zoom",
+        font=dict(size=12),
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return fig
+
+
+def plot_target_sweep_drilldown(
+    test_sweeps: dict[str, pd.DataFrame],
+    *,
+    signal_col: str,
+    bin_hz: float = 5.0,
+    title: str = "Focused Sweep Drill-Down",
+    height: int = PLOT_HEIGHT,
+    mode: str = "lines+markers",
+    marker_size: int = 4,
+) -> go.Figure:
+    """Overlay every sweep from several tests on one focused figure."""
+    fig = go.Figure()
+    dash_styles = ("solid", "dash", "dot", "dashdot", "longdash", "longdashdot")
+    plotted = 0
+
+    for test_idx, (test_name, sweep_df) in enumerate(test_sweeps.items()):
+        if (
+            sweep_df is None
+            or sweep_df.empty
+            or signal_col not in sweep_df.columns
+            or "Frequency" not in sweep_df.columns
+        ):
+            continue
+
+        plot_df = sweep_df.copy()
+        if "IsFrequencyHold" in plot_df.columns:
+            plot_df = plot_df.loc[~plot_df["IsFrequencyHold"]].copy()
+        if plot_df.empty:
+            continue
+
+        color = PALETTE[test_idx % len(PALETTE)]
+        if "Sweep" in plot_df.columns and plot_df["Sweep"].notna().any():
+            sweep_groups = plot_df.groupby("Sweep", sort=True)
+        else:
+            sweep_groups = [(0, plot_df)]
+
+        for sweep_idx, (sweep_id, sweep_sub) in enumerate(sweep_groups):
+            try:
+                binned = bin_by_frequency(
+                    sweep_sub,
+                    value_col=signal_col,
+                    bin_hz=float(bin_hz),
+                )
+            except ValueError:
+                continue
+            if binned.empty:
+                continue
+
+            trace_name = f"{test_name} / S{int(sweep_id) + 1}"
+            hover_template = (
+                f"{test_name}<br>Sweep {int(sweep_id) + 1}"
+                "<br>Frequency=%{x:.1f} Hz"
+                "<br>Flow=%{y:.2f}"
+                "<extra></extra>"
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=binned["freq_center"],
+                    y=binned["mean"],
+                    mode=mode,
+                    name=trace_name,
+                    line=dict(
+                        color=color,
+                        width=1.6,
+                        dash=dash_styles[sweep_idx % len(dash_styles)],
+                    ),
+                    marker=dict(size=marker_size, color=color),
+                    legendgroup=test_name,
+                    hovertemplate=hover_template,
+                )
+            )
+            plotted += 1
+
+    if plotted == 0:
+        fig.add_annotation(text="No sweep data available", showarrow=False)
 
     fig.update_layout(
         title=title,

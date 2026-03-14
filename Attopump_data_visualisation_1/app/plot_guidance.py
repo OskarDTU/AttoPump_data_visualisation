@@ -87,10 +87,10 @@ PLOT_GUIDANCE: dict[str, dict[str, str]] = {
         ),
         "method": (
             "Data are frequency-binned to compensate for timing uncertainty between sweep start and data acquisition, then mean curves are overlaid. "
-            "Optional error bands summarize the standard deviation within each test or target."
+            "Optional error bars summarize the standard deviation within each test or target."
         ),
         "interpretation": (
-            "Use this to compare where peaks occur, how broad the useful frequency bands are, and how much uncertainty surrounds them. Large bands in "
+            "Use this to compare where peaks occur, how broad the useful frequency bands are, and how much uncertainty surrounds them. Large error bars in "
             "high-output regions mean those peaks are less repeatable than the mean line alone suggests."
         ),
     },
@@ -107,7 +107,7 @@ PLOT_GUIDANCE: dict[str, dict[str, str]] = {
         ),
     },
     "raw_points": {
-        "title": "All Raw Data Points",
+        "title": "All Raw Sweep Points",
         "purpose": (
             "Use this when you want the least processed view of the sweep data. It supports the thesis workflow of checking raw sweep structure before "
             "trusting aggregated comparisons."
@@ -128,7 +128,7 @@ PLOT_GUIDANCE: dict[str, dict[str, str]] = {
             "highest mean output."
         ),
         "method": (
-            "After binning, all selected tests are aligned to a common frequency grid and averaged bin by bin. Standard-deviation bands summarize "
+            "After binning, all selected tests are aligned to a common frequency grid and averaged bin by bin. Standard-deviation error bars summarize "
             "between-test variability around that grand mean."
         ),
         "interpretation": (
@@ -190,6 +190,59 @@ PLOT_GUIDANCE: dict[str, dict[str, str]] = {
 }
 
 
+_GUIDE_SECTIONS: tuple[tuple[str, str, str], ...] = (
+    ("purpose", "What this plot is for", "What this plot is for:"),
+    ("method", "Method", "Method:"),
+    ("interpretation", "How to read it", "How to read it:"),
+)
+
+
+def get_plot_guidance(plot_id: str) -> dict[str, str] | None:
+    """Return the guidance entry for one plot type."""
+    return PLOT_GUIDANCE.get(plot_id)
+
+
+def build_plot_guide_markdown(plot_id: str) -> str:
+    """Format one guidance entry for Streamlit markdown rendering."""
+    guide = get_plot_guidance(plot_id)
+    if guide is None:
+        return ""
+    return "\n\n".join(
+        f"**{heading}**\n\n{guide[field]}"
+        for field, heading, _ in _GUIDE_SECTIONS
+    )
+
+
+def build_plot_guide_text(plot_id: str) -> str:
+    """Format one guidance entry for plain-text report descriptions."""
+    guide = get_plot_guidance(plot_id)
+    if guide is None:
+        return ""
+    return "\n\n".join(
+        f"{label} {guide[field]}"
+        for field, _, label in _GUIDE_SECTIONS
+    )
+
+
+def render_plot_explanation(
+    plot_id: str,
+    *,
+    label: str | None = None,
+    expanded: bool = False,
+    extra_markdown: str | None = None,
+) -> None:
+    """Render an inline explanation for one concrete plot instance."""
+    guide = get_plot_guidance(plot_id)
+    if guide is None:
+        return
+
+    expander_label = label or f"ℹ️ {guide['title']} — what it means"
+    with st.expander(expander_label, expanded=expanded):
+        st.markdown(build_plot_guide_markdown(plot_id))
+        if extra_markdown and extra_markdown.strip():
+            st.markdown(extra_markdown.strip())
+
+
 def render_plot_guide(
     plot_ids: list[str],
     *,
@@ -212,12 +265,7 @@ def render_plot_guide(
             ),
             key=f"{key_prefix}_plot_guide",
         )
-        guide = PLOT_GUIDANCE[chosen_plot]
         st.caption(
             "Based on the thesis methodology sections covering binning, plot families, and result interpretation."
         )
-        st.markdown(
-            f"**When to use it**\n\n{guide['purpose']}\n\n"
-            f"**Method**\n\n{guide['method']}\n\n"
-            f"**How to read it**\n\n{guide['interpretation']}"
-        )
+        st.markdown(build_plot_guide_markdown(chosen_plot))

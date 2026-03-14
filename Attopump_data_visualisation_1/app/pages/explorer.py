@@ -35,16 +35,16 @@ Run with: ``streamlit run streamlit_app.py`` (this module is loaded
 lazily by the root entry point).
 """
 
+from pathlib import Path
+
 import plotly.graph_objects as go
 import streamlit as st
 import traceback
 
 from ..data.io_local import (
+    find_csvs,
     list_run_dirs,
     normalize_root,
-    pick_best_csv,
-    read_csv_full,
-    read_csv_preview,
 )
 from ..data.config import (
     DEFAULT_CONSTANT_FREQUENCY_HZ,
@@ -53,7 +53,6 @@ from ..data.config import (
     SweepSpec,
 )
 from ..data.data_processor import (
-    bin_by_frequency,
     format_bin_choice_label,
     detect_test_type,
     detect_time_format,
@@ -71,6 +70,7 @@ from ..data.data_processor import (
     recommend_frequency_bin_widths,
     save_metadata_entry,
     save_user_patterns,
+    summarize_frequency_holds,
 )
 from ..data.test_configs import (
     TestConfig,
@@ -79,7 +79,14 @@ from ..data.test_configs import (
     load_test_configs,
     save_test_config,
 )
-from ..data.loader import load_csv_cached, resolve_data_path
+from ..data.loader import (
+    filter_run_names_with_local_csv_cached,
+    get_test_cache_context,
+    load_csv_cached,
+    pick_best_csv_path_cached,
+    resolve_data_path,
+)
+from ..data.persistent_cache import get_or_create_cached_test_figure
 from ..data.test_catalog import (
     format_classification_summary,
     format_detection_method,
@@ -87,10 +94,13 @@ from ..data.test_catalog import (
     resolve_test_record,
 )
 from ..plots.plot_generator import (
+    build_sweep_average_trace,
+    downsample_sweep_points,
     export_html,
     plot_constant_frequency_boxplot,
     plot_flow_histogram,
     plot_sweep_all_points,
+    plot_sweep_per_sweep_average,
     plot_sweep_binned,
     plot_time_series,
 )
@@ -98,6 +108,92 @@ from ..plots.plot_generator import (
 # ============================================================================
 # MAIN APP LOGIC WITH COMPREHENSIVE ERROR HANDLING
 # ============================================================================
+
+
+def _add_constant_average_overlay(
+    fig: go.Figure,
+    *,
+    const_freq_df,
+    time_col: str,
+    signal_col: str,
+    time_format: str,
+    avg_bin_s: float,
+) -> go.Figure:
+    """Overlay a time-binned mean ± std trace on a constant-test time series."""
+    avg_df = const_freq_df[[time_col, signal_col]].dropna().copy()
+    if avg_df.empty:
+        return fig
+
+    if time_format == "absolute_timestamp":
+        t0 = avg_df[time_col].iloc[0]
+        elapsed = (avg_df[time_col] - t0).dt.total_seconds()
+    else:
+        elapsed = avg_df[time_col].astype(float)
+
+    avg_df["_bin"] = (elapsed // avg_bin_s).astype(int)
+    binned_avg = (
+        avg_df.groupby("_bin")
+        .agg(
+            mean=(signal_col, "mean"),
+            std=(signal_col, "std"),
+            t_mid=(time_col, "median"),
+        )
+        .reset_index()
+    )
+    binned_avg["std"] = binned_avg["std"].fillna(0)
+
+    fig.add_trace(
+        go.Scatter(
+            x=binned_avg["t_mid"],
+            y=binned_avg["mean"] + binned_avg["std"],
+            mode="lines",
+            line=dict(width=0),
+            showlegend=False,
+            hoverinfo="skip",
+            legendgroup="avg",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=binned_avg["t_mid"],
+            y=binned_avg["mean"] - binned_avg["std"],
+            mode="lines",
+            line=dict(width=0),
+            fill="tonexty",
+            name=f"Avg ±1 std ({avg_bin_s:g}s bins)",
+            fillcolor="rgba(255, 100, 0, 0.18)",
+            hoverinfo="skip",
+            legendgroup="avg",
+        )
+    )
+    fig.add_trace(
+        go.Scattergl(
+            x=binned_avg["t_mid"],
+            y=binned_avg["mean"],
+            mode="lines",
+            name=f"Average ({avg_bin_s:g}s bins)",
+            line=dict(color="orangered", width=2.5),
+            legendgroup="avg",
+        )
+    )
+    return fig
+
+
+def _get_cached_test_figure(
+    *,
+    cache_context: dict[str, object] | None,
+    plot_kind: str,
+    settings: dict[str, object],
+    builder,
+):
+    """Load one persisted Explorer figure when available."""
+    fig, _ = get_or_create_cached_test_figure(
+        cache_context=cache_context,
+        plot_kind=plot_kind,
+        settings=settings,
+        builder=builder,
+    )
+    return fig
 
 
 def main():
@@ -154,9 +250,9 @@ def main():
                 key="marker_opacity_slider",
             )
             show_error_bars = st.checkbox(
-                "Show ±std error bands",
+                "Show ±std error bars",
                 value=True,
-                help="Toggle the ±1 standard-deviation shaded band on "
+                help="Toggle the ±1 standard-deviation error bars on "
                      "frequency-binned plots.",
                 key="show_error_bars_checkbox",
             )
@@ -170,7 +266,7 @@ def main():
             show_avg_error_bars = st.checkbox(
                 "Show ±std on average line",
                 value=True,
-                help="Show the ±1 std shaded band around the average "
+                help="Show the ±1 std error bars around the average "
                      "line (only visible when average is enabled).",
                 key="show_avg_error_bars_checkbox",
             )
@@ -338,7 +434,7 @@ def main():
             st.stop()
 
         try:
-            run_dirs = list(list_run_dirs(root))
+            run_dirs = sorted(list_run_dirs(root), key=lambda p: p.name, reverse=True)
         except Exception as e:
             st.error(f"❌ Failed to list folders: {e}")
             st.stop()
@@ -369,21 +465,49 @@ def main():
                 f"Showing {len(ranked_run_names)} ranked match(es) out of {len(run_names)} tests."
             )
 
-        selected_run_name = st.selectbox("📂 Matching run folders", ranked_run_names)
+        selectable_run_names = ranked_run_names
+        skipped_run_names: list[str] = []
+        if auto_pick_csv:
+            available_run_names, unavailable_run_names = (
+                filter_run_names_with_local_csv_cached(
+                    str(root),
+                    tuple(ranked_run_names),
+                )
+            )
+            selectable_run_names = list(available_run_names)
+            skipped_run_names = list(unavailable_run_names)
+
+            if not selectable_run_names:
+                st.warning(
+                    "No matching test folders have a locally available data CSV. "
+                    "Download the folder or mark it 'Always Keep on This Device' in OneDrive and retry."
+                )
+                st.stop()
+
+            if skipped_run_names:
+                st.caption(
+                    f"Skipped {len(skipped_run_names)} run(s) whose data CSVs are not downloaded locally."
+                )
+
+        selected_run_name = st.selectbox("📂 Matching run folders", selectable_run_names)
         run_dir = run_map[selected_run_name]
+        cache_context = None
 
         # Determine CSV file
         if auto_pick_csv:
             try:
-                pick_result = pick_best_csv(run_dir)
-                csv_path = pick_result.csv_path
+                csv_path = Path(pick_best_csv_path_cached(str(run_dir)))
+                cache_context = get_test_cache_context(selected_run_name, run_dir)
             except Exception as e:
                 st.error(f"❌ Auto-pick failed: {e}")
                 st.stop()
         else:
-            csvs = sorted([p for p in run_dir.glob("*.csv") if p.is_file()])
+            csvs = find_csvs(run_dir)
             if not csvs:
-                st.error("❌ No CSV files found in selected folder.")
+                st.error(
+                    "❌ No locally available data CSV files found in selected folder. "
+                    "Download the folder or mark it 'Always Keep on This Device' and retry."
+                )
                 st.stop()
             csv_choice = st.selectbox("Choose CSV", [p.name for p in csvs])
             csv_path = run_dir / csv_choice
@@ -394,17 +518,7 @@ def main():
         # LOAD AND PREVIEW DATA
         # ========================================================================
         try:
-            preview_df = read_csv_preview(csv_path, nrows=300)
-        except Exception as e:
-            st.error(f"❌ Failed to read preview: {e}")
-            st.stop()
-
-        with st.expander("👁️ Preview (first 300 rows)", expanded=False):
-            st.dataframe(preview_df, use_container_width=True)
-
-        # Load full data for analysis
-        try:
-            df = read_csv_full(csv_path)
+            df = load_csv_cached(str(csv_path))
         except Exception as e:
             st.error(f"❌ Failed to load CSV: {e}")
             st.stop()
@@ -412,6 +526,9 @@ def main():
         if df.empty:
             st.error("❌ CSV is empty.")
             st.stop()
+
+        with st.expander("👁️ Preview (first 300 rows)", expanded=False):
+            st.dataframe(df.head(300), use_container_width=True)
 
         # Debug: Show column info
         with st.expander("🔍 Debug: Column Info", expanded=False):
@@ -757,76 +874,49 @@ def main():
 
             # ── 1) LARGE TIME SERIES (full width) ──
             try:
-                fig_ts = plot_time_series(
-                    const_freq_df,
-                    x_col=time_col,
-                    y_col=signal_col,
-                    title=f"{selected_run_name} — Flow vs Time",
-                    mode=plot_mode,
-                    marker_size=marker_size,
-                    opacity=marker_opacity,
-                    y_range=y_range,
+                fig_ts = _get_cached_test_figure(
+                    cache_context=cache_context,
+                    plot_kind="explorer_constant_time_series",
+                    settings={
+                        "signal_col": signal_col,
+                        "x_col": time_col,
+                        "mode": plot_mode,
+                        "marker_size": int(marker_size),
+                        "opacity": float(marker_opacity),
+                        "show_const_avg": bool(show_const_avg),
+                        "avg_bin_s": float(avg_bin_s),
+                        "time_format": time_format,
+                        "y_range": list(y_range) if y_range is not None else None,
+                    },
+                    builder=lambda: _add_constant_average_overlay(
+                        plot_time_series(
+                            const_freq_df,
+                            x_col=time_col,
+                            y_col=signal_col,
+                            title=f"{selected_run_name} — Flow vs Time",
+                            mode=plot_mode,
+                            marker_size=marker_size,
+                            opacity=marker_opacity,
+                            y_range=y_range,
+                        ),
+                        const_freq_df=const_freq_df,
+                        time_col=time_col,
+                        signal_col=signal_col,
+                        time_format=time_format,
+                        avg_bin_s=float(avg_bin_s),
+                    )
+                    if show_const_avg
+                    else plot_time_series(
+                        const_freq_df,
+                        x_col=time_col,
+                        y_col=signal_col,
+                        title=f"{selected_run_name} — Flow vs Time",
+                        mode=plot_mode,
+                        marker_size=marker_size,
+                        opacity=marker_opacity,
+                        y_range=y_range,
+                    ),
                 )
-
-                # ── Time-binned average overlay ──────────────────────
-                if show_const_avg:
-                    import numpy as _np
-                    _avg_df = const_freq_df[[time_col, signal_col]].dropna().copy()
-
-                    if time_format == "absolute_timestamp":
-                        _t0 = _avg_df[time_col].iloc[0]
-                        _elapsed = (_avg_df[time_col] - _t0).dt.total_seconds()
-                    else:
-                        _elapsed = _avg_df[time_col].astype(float)
-
-                    _avg_df["_bin"] = (_elapsed // avg_bin_s).astype(int)
-                    _binned_avg = (
-                        _avg_df.groupby("_bin")
-                        .agg(
-                            mean=(signal_col, "mean"),
-                            std=(signal_col, "std"),
-                            t_mid=(time_col, "median"),
-                        )
-                        .reset_index()
-                    )
-                    _binned_avg["std"] = _binned_avg["std"].fillna(0)
-
-                    # ±1 std band
-                    fig_ts.add_trace(
-                        go.Scatter(
-                            x=_binned_avg["t_mid"],
-                            y=_binned_avg["mean"] + _binned_avg["std"],
-                            mode="lines",
-                            line=dict(width=0),
-                            showlegend=False,
-                            hoverinfo="skip",
-                            legendgroup="avg",
-                        )
-                    )
-                    fig_ts.add_trace(
-                        go.Scatter(
-                            x=_binned_avg["t_mid"],
-                            y=_binned_avg["mean"] - _binned_avg["std"],
-                            mode="lines",
-                            line=dict(width=0),
-                            fill="tonexty",
-                            name=f"Avg ±1 std ({avg_bin_s:g}s bins)",
-                            fillcolor="rgba(255, 100, 0, 0.18)",
-                            hoverinfo="skip",
-                            legendgroup="avg",
-                        )
-                    )
-                    # Mean line
-                    fig_ts.add_trace(
-                        go.Scattergl(
-                            x=_binned_avg["t_mid"],
-                            y=_binned_avg["mean"],
-                            mode="lines",
-                            name=f"Average ({avg_bin_s:g}s bins)",
-                            line=dict(color="orangered", width=2.5),
-                            legendgroup="avg",
-                        )
-                    )
 
                 st.plotly_chart(fig_ts, use_container_width=True)
 
@@ -844,10 +934,18 @@ def main():
 
             with col_left:
                 try:
-                    fig_box = plot_constant_frequency_boxplot(
-                        const_freq_df,
-                        y_col=signal_col,
-                        title=f"Flow @ {default_freq:g} Hz",
+                    fig_box = _get_cached_test_figure(
+                        cache_context=cache_context,
+                        plot_kind="explorer_constant_boxplot",
+                        settings={
+                            "signal_col": signal_col,
+                            "title_frequency_hz": float(default_freq),
+                        },
+                        builder=lambda: plot_constant_frequency_boxplot(
+                            const_freq_df,
+                            y_col=signal_col,
+                            title=f"Flow @ {default_freq:g} Hz",
+                        ),
                     )
                     st.plotly_chart(fig_box, use_container_width=True)
 
@@ -862,11 +960,19 @@ def main():
 
             with col_right:
                 try:
-                    fig_hist = plot_flow_histogram(
-                        const_freq_df,
-                        y_col=signal_col,
-                        nbins=int(hist_bins),
-                        title=f"{selected_run_name} — Flow Distribution",
+                    fig_hist = _get_cached_test_figure(
+                        cache_context=cache_context,
+                        plot_kind="explorer_constant_histogram",
+                        settings={
+                            "signal_col": signal_col,
+                            "nbins": int(hist_bins),
+                        },
+                        builder=lambda: plot_flow_histogram(
+                            const_freq_df,
+                            y_col=signal_col,
+                            nbins=int(hist_bins),
+                            title=f"{selected_run_name} — Flow Distribution",
+                        ),
                     )
                     st.plotly_chart(fig_hist, use_container_width=True)
 
@@ -934,54 +1040,60 @@ def main():
                 st.error(f"❌ Failed to prepare sweep data: {e}")
                 st.stop()
 
-            bin_reco = recommend_frequency_bin_widths([sweep_df])
+            sweep_plot_df = (
+                sweep_df.loc[~sweep_df["IsFrequencyHold"]].copy()
+                if "IsFrequencyHold" in sweep_df.columns
+                else sweep_df.copy()
+            )
+            if sweep_plot_df.empty:
+                sweep_plot_df = sweep_df.copy()
+
+            hold_summary = summarize_frequency_holds(
+                sweep_df,
+                signal_col=signal_col,
+            )
+            overlay_bin_reco = recommend_frequency_bin_widths(
+                [sweep_df],
+                value_col=signal_col,
+            )
             bin_signature = (
                 selected_run_name,
                 repr(sweep_spec),
                 len(sweep_df),
+                int(sweep_df["IsFrequencyHold"].sum())
+                if "IsFrequencyHold" in sweep_df.columns
+                else 0,
             )
             if st.session_state.get("_explorer_bin_signature") != bin_signature:
-                st.session_state["bin_hz_slider"] = bin_reco["test_bin_hz"]
                 st.session_state["_explorer_bin_signature"] = bin_signature
-                st.session_state["_explorer_bin_recommendation"] = bin_reco
-
-            # Binning & display options
-            col1, col2 = st.columns(2)
-            with col1:
-                bin_hz = st.slider(
-                    "📊 Frequency bin width (Hz)",
-                    min_value=0.5,
-                    max_value=100.0,
-                    value=float(PLOT_BIN_WIDTH_HZ),
-                    step=0.5,
-                    key="bin_hz_slider",
-                    help="Width of each frequency bin for the binned plot. "
-                         "Smaller = more detail but noisier. Larger = smoother.",
-                )
-                explorer_reco = st.session_state.get("_explorer_bin_recommendation")
-                if explorer_reco:
-                    st.caption(
-                        "Recommended for this sweep: "
-                        + explain_frequency_bin_recommendation(
-                            explorer_reco,
-                            include_average_bin=False,
-                        )
+                st.session_state["explorer_binned_bin_hz"] = float(PLOT_BIN_WIDTH_HZ)
+                st.session_state["explorer_average_bin_hz"] = float(PLOT_BIN_WIDTH_HZ)
+                if int(overlay_bin_reco.get("test_series_count", 0)) >= 2:
+                    st.session_state["explorer_average_bin_hz"] = float(
+                        overlay_bin_reco["test_bin_hz"]
                     )
-                    if st.button("Reset to recommended bin", key="explorer_reset_bin"):
-                        st.session_state["bin_hz_slider"] = explorer_reco["test_bin_hz"]
-                        st.rerun()
-            with col2:
-                max_points = st.slider(
-                    "Max points to plot",
-                    min_value=1000,
-                    max_value=500000,
-                    value=int(MAX_POINTS_DEFAULT),
-                    step=5000,
-                    key="max_points_slider",
-                    help="Limit the number of data points sent to the browser. "
-                         "Lower values = faster rendering. The full dataset is "
-                         "still used for binned statistics.",
-                )
+                    st.session_state["_explorer_average_bin_recommendation"] = overlay_bin_reco
+                else:
+                    st.session_state.pop("_explorer_average_bin_recommendation", None)
+
+            def _reset_explorer_average_bin() -> None:
+                recommendation = st.session_state.get("_explorer_average_bin_recommendation")
+                if recommendation and int(recommendation.get("test_series_count", 0)) >= 2:
+                    st.session_state["explorer_average_bin_hz"] = float(
+                        recommendation["test_bin_hz"]
+                    )
+
+            max_points = st.slider(
+                "Max points to plot",
+                min_value=1000,
+                max_value=500000,
+                value=int(MAX_POINTS_DEFAULT),
+                step=5000,
+                key="max_points_slider",
+                help="Limit the number of data points sent to the browser. "
+                     "Lower values = faster rendering. The full dataset is "
+                     "still used for binned statistics.",
+            )
 
             # Create tabs
             tab_ts, tab_freq = st.tabs(["⏱️ Time Series", "📊 Frequency Analysis"])
@@ -989,15 +1101,27 @@ def main():
             # TIME SERIES TAB
             with tab_ts:
                 try:
-                    fig_ts = plot_time_series(
-                        ts_df,
-                        x_col=time_col,
-                        y_col=signal_col,
-                        title=f"{selected_run_name} — Flow vs Time",
-                        mode=plot_mode,
-                        marker_size=marker_size,
-                        opacity=marker_opacity,
-                        y_range=y_range,
+                    fig_ts = _get_cached_test_figure(
+                        cache_context=cache_context,
+                        plot_kind="explorer_sweep_time_series",
+                        settings={
+                            "signal_col": signal_col,
+                            "x_col": time_col,
+                            "mode": plot_mode,
+                            "marker_size": int(marker_size),
+                            "opacity": float(marker_opacity),
+                            "y_range": list(y_range) if y_range is not None else None,
+                        },
+                        builder=lambda: plot_time_series(
+                            ts_df,
+                            x_col=time_col,
+                            y_col=signal_col,
+                            title=f"{selected_run_name} — Flow vs Time",
+                            mode=plot_mode,
+                            marker_size=marker_size,
+                            opacity=marker_opacity,
+                            y_range=y_range,
+                        ),
                     )
                     st.plotly_chart(fig_ts, use_container_width=True)
 
@@ -1016,7 +1140,11 @@ def main():
             # FREQUENCY ANALYSIS TAB
             with tab_freq:
                 # ── Sweep visibility controls ────────────────────────────
-                all_sweep_ids = sorted(sweep_df["Sweep"].unique()) if "Sweep" in sweep_df.columns else []
+                all_sweep_ids = (
+                    sorted(sweep_plot_df["Sweep"].unique())
+                    if "Sweep" in sweep_plot_df.columns
+                    else []
+                )
                 all_sweep_labels = [f"Sweep {int(s) + 1}" for s in all_sweep_ids]
 
                 if len(all_sweep_ids) > 1:
@@ -1051,15 +1179,60 @@ def main():
                 else:
                     visible_sweep_set = None  # single sweep → always visible
 
+                explorer_avg_reco = st.session_state.get("_explorer_average_bin_recommendation")
+                average_bin_hz = float(
+                    st.session_state.get("explorer_average_bin_hz", float(PLOT_BIN_WIDTH_HZ))
+                )
+                if show_average:
+                    avg_ctrl_col, avg_btn_col = st.columns([3, 1])
+                    with avg_ctrl_col:
+                        average_bin_hz = st.slider(
+                            "Average overlay bin width (Hz)",
+                            min_value=0.5,
+                            max_value=100.0,
+                            value=float(PLOT_BIN_WIDTH_HZ),
+                            step=0.5,
+                            key="explorer_average_bin_hz",
+                            help=(
+                                "Used only for the black average/error-bar overlay in the raw "
+                                "all-sweeps plot below."
+                            ),
+                        )
+                        if explorer_avg_reco and int(explorer_avg_reco.get("test_series_count", 0)) >= 2:
+                            st.caption(
+                                "Recommended for the overlaid sweep average: "
+                                + explain_frequency_bin_recommendation(
+                                    explorer_avg_reco,
+                                    include_average_bin=False,
+                                )
+                            )
+                    with avg_btn_col:
+                        if explorer_avg_reco and int(explorer_avg_reco.get("test_series_count", 0)) >= 2:
+                            st.button(
+                                "Reset overlay bin",
+                                key="explorer_reset_average_bin",
+                                on_click=_reset_explorer_average_bin,
+                            )
+
+                average_per_sweep = st.checkbox(
+                    "Average each sweep separately in the second plot",
+                    value=(len(all_sweep_ids) > 1),
+                    key="explorer_average_per_sweep",
+                    help=(
+                        "When enabled, the averaged plot bins each sweep separately and "
+                        "shows one mean ± std trace per sweep instead of one combined mean "
+                        "across all sweeps."
+                    ),
+                )
+
                 # ── Compute average overlay (full dataset, not capped) ───
                 avg_df = None
                 if show_average:
                     try:
-                        avg_df = bin_by_frequency(
-                            sweep_df,
-                            value_col=signal_col,
-                            freq_col="Frequency",
-                            bin_hz=float(bin_hz),
+                        avg_df = build_sweep_average_trace(
+                            sweep_plot_df,
+                            signal_col=signal_col,
+                            bin_hz=float(average_bin_hz),
                         )
                         avg_df = avg_df.rename(columns={"freq_center": "freq"})
                         avg_df = avg_df[[col for col in ["freq", "mean", "std"] if col in avg_df.columns]]
@@ -1067,26 +1240,67 @@ def main():
                         avg_df = None
 
                 # ── All points plot (capped for browser performance) ─────
-                pts_df = sweep_df.head(int(max_points))
+                pts_df = downsample_sweep_points(
+                    sweep_plot_df,
+                    max_points=int(max_points),
+                    sweep_col="Sweep",
+                )
 
                 try:
-                    st.caption(
-                        "This figure shows raw sweep points. The selected bin width is applied to the "
-                        "binned plot below and, when enabled, to the black average overlay here."
+                    points_caption = (
+                        "This figure shows raw sweep points for all visible sweeps. "
+                        "If the browser point cap is lower than the full dataset, the points are "
+                        "downsampled evenly across sweeps so every sweep stays represented. "
+                        "The average overlay uses the *Average overlay bin width* control above."
                     )
-                    fig_pts = plot_sweep_all_points(
-                        pts_df,
-                        x_col="Frequency",
-                        y_col=signal_col,
-                        color_col="Sweep",
-                        title=f"{selected_run_name} — All Points ({len(pts_df):,} of {len(sweep_df):,})",
-                        mode=plot_mode if plot_mode != "lines" else "markers",
-                        marker_size=marker_size,
-                        opacity=marker_opacity,
-                        y_range=y_range,
-                        visible_sweeps=visible_sweep_set,
-                        average_df=avg_df,
-                        show_average_error_bars=show_avg_error_bars,
+                    if not hold_summary.empty:
+                        points_caption += (
+                            f" Removed {int(sweep_df['IsFrequencyHold'].sum()):,} hold-point samples "
+                            "from long constant-frequency pauses in the merged sweep."
+                        )
+                    st.caption(points_caption)
+                    fig_pts = _get_cached_test_figure(
+                        cache_context=cache_context,
+                        plot_kind="explorer_sweep_all_points",
+                        settings={
+                            "signal_col": signal_col,
+                            "max_points": int(max_points),
+                            "mode": (
+                                "markers"
+                                if len(all_sweep_ids) > 1
+                                else (plot_mode if plot_mode != "lines" else "markers")
+                            ),
+                            "marker_size": int(marker_size),
+                            "opacity": float(marker_opacity),
+                            "y_range": list(y_range) if y_range is not None else None,
+                            "visible_sweeps": (
+                                sorted(int(sw) for sw in visible_sweep_set)
+                                if visible_sweep_set is not None
+                                else None
+                            ),
+                            "show_average": bool(show_average and avg_df is not None and not avg_df.empty),
+                            "show_average_error_bars": bool(show_avg_error_bars),
+                            "average_bin_hz": float(average_bin_hz) if show_average else None,
+                        },
+                        builder=lambda: plot_sweep_all_points(
+                            pts_df,
+                            x_col="Frequency",
+                            y_col=signal_col,
+                            color_col="Sweep",
+                            title=(
+                                f"{selected_run_name} — All Sweep Points "
+                                f"({len(pts_df):,} of {len(sweep_plot_df):,})"
+                            ),
+                            mode="markers" if len(all_sweep_ids) > 1 else (
+                                plot_mode if plot_mode != "lines" else "markers"
+                            ),
+                            marker_size=marker_size,
+                            opacity=marker_opacity,
+                            y_range=y_range,
+                            visible_sweeps=visible_sweep_set,
+                            average_df=avg_df,
+                            show_average_error_bars=show_avg_error_bars,
+                        ),
                     )
                     st.plotly_chart(fig_pts, use_container_width=True)
 
@@ -1100,62 +1314,155 @@ def main():
                     st.error(f"❌ All points plot failed: {e}")
 
                 # ── Binned plot ──────────────────────────────────────────
+                binned_bin_hz = st.slider(
+                    "Averaged plot bin width (Hz)",
+                    min_value=0.5,
+                    max_value=100.0,
+                    value=float(PLOT_BIN_WIDTH_HZ),
+                    step=0.5,
+                    key="explorer_binned_bin_hz",
+                    help=(
+                        "Used only for the averaged plot below. Smaller bins preserve more "
+                        "detail; larger bins smooth more."
+                    ),
+                )
+                combined_average_df = None
                 try:
-                    binned = bin_by_frequency(
-                        sweep_df,
-                        value_col=signal_col,
-                        freq_col="Frequency",
-                        bin_hz=float(bin_hz),
+                    combined_average_df = build_sweep_average_trace(
+                        sweep_plot_df,
+                        signal_col=signal_col,
+                        bin_hz=float(binned_bin_hz),
                     )
                 except Exception as e:
-                    st.error(f"❌ Binning failed: {e}")
-                    binned = None
+                    st.error(f"❌ Averaging sweeps failed: {e}")
 
-                if binned is not None:
-                    n_bins = len(binned)
+                if average_per_sweep:
                     try:
-                        fig_bin = plot_sweep_binned(
-                            binned,
-                            x_col="freq_center",
-                            y_col="mean",
-                            std_col="std",
-                            title=(
-                                f"{selected_run_name} — Binned Mean ± Std"
-                                f"  ({n_bins} bins, {format_bin_choice_label(float(bin_hz), explorer_reco)})"
+                        fig_bin = _get_cached_test_figure(
+                            cache_context=cache_context,
+                            plot_kind="explorer_sweep_per_sweep_average",
+                            settings={
+                                "signal_col": signal_col,
+                                "bin_hz": float(binned_bin_hz),
+                                "mode": plot_mode,
+                                "marker_size": int(marker_size),
+                                "show_error_bars": bool(show_error_bars),
+                                "y_range": list(y_range) if y_range is not None else None,
+                                "visible_sweeps": (
+                                    sorted(int(sw) for sw in visible_sweep_set)
+                                    if visible_sweep_set is not None
+                                    else None
+                                ),
+                            },
+                            builder=lambda: plot_sweep_per_sweep_average(
+                                sweep_plot_df,
+                                signal_col=signal_col,
+                                bin_hz=float(binned_bin_hz),
+                                title=(
+                                    f"{selected_run_name} — Per-Sweep Mean ± Std Error "
+                                    f"({format_bin_choice_label(float(binned_bin_hz), None)})"
+                                ),
+                                mode=plot_mode,
+                                marker_size=marker_size,
+                                show_error_bars=show_error_bars,
+                                y_range=y_range,
+                                visible_sweeps=visible_sweep_set,
                             ),
-                            mode=plot_mode,
-                            marker_size=marker_size,
-                            show_error_bars=show_error_bars,
-                            y_range=y_range,
+                        )
+                        st.caption(
+                            "This figure bins each sweep separately and plots the mean flow in "
+                            "each frequency bin. Error bars show the within-sweep standard "
+                            "deviation inside each bin."
                         )
                         st.plotly_chart(fig_bin, use_container_width=True)
 
                         if export_html_toggle:
                             try:
-                                path = export_html(fig_bin, f"{selected_run_name}_sweep_binned.html")
+                                path = export_html(
+                                    fig_bin,
+                                    f"{selected_run_name}_sweep_per_sweep_average.html",
+                                )
                                 st.success(f"✅ Exported: {path.name}")
                             except Exception as e:
                                 st.error(f"❌ Export failed: {e}")
                     except Exception as e:
-                        st.error(f"❌ Binned plot failed: {e}")
+                        st.error(f"❌ Per-sweep averaged plot failed: {e}")
+                if combined_average_df is not None and not combined_average_df.empty:
+                    n_bins = len(combined_average_df)
+                    try:
+                        fig_avg = _get_cached_test_figure(
+                            cache_context=cache_context,
+                            plot_kind="explorer_sweep_average",
+                            settings={
+                                "signal_col": signal_col,
+                                "bin_hz": float(binned_bin_hz),
+                                "mode": plot_mode,
+                                "marker_size": int(marker_size),
+                                "show_error_bars": bool(show_error_bars),
+                                "y_range": list(y_range) if y_range is not None else None,
+                            },
+                            builder=lambda: plot_sweep_binned(
+                                combined_average_df,
+                                x_col="freq_center",
+                                y_col="mean",
+                                std_col="std",
+                                title=(
+                                    f"{selected_run_name} — Average Across All Sweeps "
+                                    f"({n_bins} bins, {format_bin_choice_label(float(binned_bin_hz), None)})"
+                                ),
+                                mode=plot_mode,
+                                marker_size=marker_size,
+                                show_error_bars=show_error_bars,
+                                y_range=y_range,
+                            ),
+                        )
+                        st.caption(
+                            "This single line is the per-frequency average of the individual "
+                            "sweep curves, so each sweep contributes equally at a given "
+                            "frequency. Its error bars show the sweep-to-sweep spread."
+                        )
+                        st.plotly_chart(fig_avg, use_container_width=True)
 
-                    with st.expander("📋 Binned Data Table", expanded=False):
+                        if export_html_toggle:
+                            try:
+                                path = export_html(fig_avg, f"{selected_run_name}_sweep_average.html")
+                                st.success(f"✅ Exported: {path.name}")
+                            except Exception as e:
+                                st.error(f"❌ Export failed: {e}")
+                    except Exception as e:
+                        st.error(f"❌ Combined average plot failed: {e}")
+
+                    with st.expander("📋 Averaged Data Table", expanded=False):
                         st.caption(
                             f"Each row is one frequency bin of width "
-                            f"**{bin_hz:g} Hz**. Change the *Frequency bin "
-                            f"width* slider above to make bins wider (smoother) "
-                            f"or narrower (more detail)."
+                            f"**{binned_bin_hz:g} Hz**. These values come from averaging the "
+                            "per-sweep binned curves onto a common frequency grid."
                         )
-                        st.dataframe(binned, use_container_width=True)
+                        st.dataframe(combined_average_df, use_container_width=True)
+
+                if not hold_summary.empty:
+                    with st.expander(
+                        "⏸️ Constant-frequency hold segments removed from the frequency plots",
+                        expanded=False,
+                    ):
+                        st.caption(
+                            "These long constant-frequency pauses were detected in the merged "
+                            "microcontroller data and excluded from the sweep-frequency plots "
+                            "so they do not dominate setpoints such as 500 Hz."
+                        )
+                        st.dataframe(hold_summary, use_container_width=True, hide_index=True)
 
                 # ── Per-sweep average summary table ──────────────────────
                 import pandas as pd
-                if "Sweep" in sweep_df.columns and signal_col in sweep_df.columns:
-                    sweep_ids = sorted(sweep_df["Sweep"].unique())
+                if "Sweep" in sweep_plot_df.columns and signal_col in sweep_plot_df.columns:
+                    sweep_ids = sorted(sweep_plot_df["Sweep"].unique())
                     if len(sweep_ids) > 0:
                         rows = []
                         for sw in sweep_ids:
-                            sub = sweep_df.loc[sweep_df["Sweep"] == sw, signal_col].dropna()
+                            sub = sweep_plot_df.loc[
+                                sweep_plot_df["Sweep"] == sw,
+                                signal_col,
+                            ].dropna()
                             if sub.empty:
                                 continue
                             rows.append({

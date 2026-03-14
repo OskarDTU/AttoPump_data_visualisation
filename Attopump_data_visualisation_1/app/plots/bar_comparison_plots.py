@@ -13,10 +13,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 
 from ..data.config import PLOT_HEIGHT
-from .shared import PUMP_PALETTE, color_to_rgba, flow_label
+from .shared import PUMP_PALETTE, color_to_rgba, flow_label, std_error_bar_style
 
 
 def _bar_color(index: int) -> str:
@@ -82,30 +81,17 @@ def plot_bar_sweep_overlay(
                 name=bar_name,
                 line=dict(color=color, width=3),
                 marker=dict(size=marker_size),
+                error_y=(
+                    std_error_bar_style(
+                        avg_df["std"].fillna(0),
+                        color=color,
+                    )
+                    if show_error_bars and "std" in avg_df.columns
+                    else None
+                ),
                 legendgroup=bar_name,
             )
         )
-
-        # ± std band
-        if show_error_bars and "std" in avg_df.columns:
-            upper = avg_df["mean"] + avg_df["std"].fillna(0)
-            lower = avg_df["mean"] - avg_df["std"].fillna(0)
-            fill = color_to_rgba(color, 0.15)
-            fig.add_trace(
-                go.Scatter(
-                    x=avg_df["freq_center"], y=upper,
-                    mode="lines", line=dict(width=0),
-                    showlegend=False, legendgroup=bar_name, hoverinfo="skip",
-                )
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=avg_df["freq_center"], y=lower,
-                    mode="lines", line=dict(width=0),
-                    fill="tonexty", fillcolor=fill,
-                    showlegend=False, legendgroup=bar_name, hoverinfo="skip",
-                )
-            )
 
     fig.update_layout(
         title="Frequency Sweep – Bar Comparison",

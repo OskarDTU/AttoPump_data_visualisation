@@ -15,6 +15,7 @@ from ..data.pump_registry import (
     PumpRegistry,
     link_test,
     migrate_legacy_files,
+    registry_storage_signature,
     save_registry,
 )
 from ..data.test_catalog import (
@@ -53,8 +54,14 @@ def _filter_catalog(df: pd.DataFrame, query: str, mode: str) -> pd.DataFrame:
 
 
 def _get_registry() -> PumpRegistry:
-    if "_pump_registry" not in st.session_state:
+    sig_key = "_pump_registry_signature"
+    current_sig = registry_storage_signature()
+    if (
+        "_pump_registry" not in st.session_state
+        or st.session_state.get(sig_key) != current_sig
+    ):
         st.session_state["_pump_registry"] = migrate_legacy_files()
+        st.session_state[sig_key] = registry_storage_signature()
     return st.session_state["_pump_registry"]
 
 
@@ -141,6 +148,7 @@ def _render_detail_panel(root: Path, run_map: dict[str, Path], available_names: 
 
                 link_test(reg, assign_pump, TestLink(folder=selected_name))
                 save_registry(reg)
+                st.session_state["_pump_registry_signature"] = registry_storage_signature()
                 st.success(f"Linked **{selected_name}** → **{assign_pump}**")
                 st.rerun()
     else:

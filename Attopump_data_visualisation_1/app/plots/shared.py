@@ -9,19 +9,19 @@ from __future__ import annotations
 
 import re
 
-import plotly.express as px
+from plotly.colors import qualitative
 
 # ── Shared color palettes ───────────────────────────────────────────────
 PALETTE = (
-    px.colors.qualitative.Plotly
-    + px.colors.qualitative.Set2
-    + px.colors.qualitative.Dark24
+    qualitative.Plotly
+    + qualitative.Set2
+    + qualitative.Dark24
 )
 
 PUMP_PALETTE = (
-    px.colors.qualitative.Bold
-    + px.colors.qualitative.Plotly
-    + px.colors.qualitative.Set1
+    qualitative.Bold
+    + qualitative.Plotly
+    + qualitative.Set1
 )
 
 
@@ -45,6 +45,25 @@ def color_to_rgba(color: str, alpha: float = 0.2) -> str:
             pass
 
     return f"rgba(128, 128, 128, {alpha})"
+
+
+def std_error_bar_style(
+    std_values,
+    *,
+    color: str,
+    alpha: float = 0.45,
+    thickness: float = 1.1,
+    width: float = 3.0,
+) -> dict:
+    """Return a Plotly ``error_y`` config for ±1 standard-deviation whiskers."""
+    return {
+        "type": "data",
+        "array": std_values,
+        "visible": True,
+        "color": color_to_rgba(color, alpha),
+        "thickness": thickness,
+        "width": width,
+    }
 
 
 def flow_label(col: str) -> str:

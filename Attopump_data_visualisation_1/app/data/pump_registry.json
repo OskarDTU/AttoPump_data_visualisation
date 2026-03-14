@@ -94,11 +94,122 @@
           "author": "Oskar",
           "voltage": "2.5V",
           "notes": ""
+        },
+        {
+          "folder": "20260306-1454-500Hz-Pump-20260227-1",
+          "test_type": "Manual, constnt frequency = 100 Hz",
+          "description": "",
+          "success": null,
+          "date": "2026-03-06",
+          "author": "OS",
+          "voltage": "",
+          "notes": ""
+        },
+        {
+          "folder": "20260313-1554-1Hz_1500H_Hz_1_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 1 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-13",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260313-1611-1Hz_1500H_Hz_1_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 1 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-13",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260313-161148-1Hz_1500H_Hz_500_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 500 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-13",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260313-1656-500Hz",
+          "test_type": "Manual, constant frequency = 500Hz",
+          "description": "",
+          "success": null,
+          "date": "2025-03-13",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260313-1904-1Hz_1500H_Hz_1_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 1 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-13",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260313-1906-500Hz",
+          "test_type": "Manual, constant frequency = 500Hz",
+          "description": "",
+          "success": null,
+          "date": "2025-03-13",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260313-1917-1Hz_1500H_Hz_500_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 500 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-13",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
         }
       ],
       "description": "PUMP 270226-1",
       "notes": "",
-      "sub_groups": {},
+      "sub_groups": {
+        "Japan set 1 - missing constant freq. test": {
+          "name": "Japan set 1 - missing constant freq. test",
+          "tests": [
+            "20260306-1155-1Hz_1500H_Hz_1_seconds",
+            "20260306-1329-1Hz_1500H_Hz_500_seconds",
+            "20260306-1357-300Hz_1000H_Hz_10_seconds",
+            "20260306-1408-300Hz_1000H_Hz_5_seconds",
+            "20260306-1415-300Hz_1000H_Hz_1_seconds",
+            "20260306-1422-1Hz_1500H_Hz_500_seconds"
+          ],
+          "description": "These are 5 tests that seek to characterise the pump before shipment to Japan. No constant frequency test was performed in this set."
+        },
+        "Japan set 2 - including constant freq": {
+          "name": "Japan set 2 - including constant freq",
+          "tests": [
+            "20260313-1656-500Hz",
+            "20260313-161148-1Hz_1500H_Hz_500_seconds",
+            "20260313-1611-1Hz_1500H_Hz_1_seconds"
+          ],
+          "description": ""
+        },
+        "Japan set 3 - final": {
+          "name": "Japan set 3 - final",
+          "tests": [
+            "20260313-1904-1Hz_1500H_Hz_1_seconds",
+            "20260313-1906-500Hz",
+            "20260313-1917-1Hz_1500H_Hz_500_seconds"
+          ],
+          "description": "The pump wasn't performing as hoped for, so Nicolas took it apart and rebuilt it. These are tests from the rebuild"
+        }
+      },
       "created_at": "2026-03-10T12:37:22+00:00"
     },
     "PUMP 270226-2": {
@@ -303,6 +414,36 @@
           "author": "Oskar",
           "voltage": "2.5V",
           "notes": ""
+        },
+        {
+          "folder": "20260312-1536-1Hz_1500H_Hz_1_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 1 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-12",
+          "author": "OS",
+          "voltage": "2.3V",
+          "notes": ""
+        },
+        {
+          "folder": "20260312-1538-1Hz_1500H_Hz_1_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 500 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-12",
+          "author": "OS",
+          "voltage": "2.3V",
+          "notes": ""
+        },
+        {
+          "folder": "20260312-1555-500Hz-Pump-20260227-3",
+          "test_type": "Manual, constant frequency = 500Hz",
+          "description": "",
+          "success": null,
+          "date": "2025-03-12",
+          "author": "OS",
+          "voltage": "2.3V",
+          "notes": ""
         }
       ],
       "description": "PUMP 270226-3",
@@ -362,11 +503,51 @@
           "author": "",
           "voltage": "",
           "notes": ""
+        },
+        {
+          "folder": "20260312-1607-1Hz_1500H_Hz_1_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 1 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-12",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260312-1614-1Hz_1500H_Hz_500_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 500 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-12",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260312-1634-500Hz-Pump-20260227-4",
+          "test_type": "Manual, constant frequency = 500Hz",
+          "description": "",
+          "success": null,
+          "date": "2025-03-12",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
         }
       ],
       "description": "PUMP 270226-4",
       "notes": "",
-      "sub_groups": {},
+      "sub_groups": {
+        "Japan test set": {
+          "name": "Japan test set",
+          "tests": [
+            "20260312-1607-1Hz_1500H_Hz_1_seconds",
+            "20260312-1614-1Hz_1500H_Hz_500_seconds",
+            "20260312-1634-500Hz-Pump-20260227-4"
+          ],
+          "description": ""
+        }
+      },
       "created_at": "2026-03-10T12:37:22+00:00"
     },
     "Pump 020326": {
@@ -401,11 +582,71 @@
           "author": "",
           "voltage": "",
           "notes": ""
+        },
+        {
+          "folder": "20260313-1001-1Hz_1500H_Hz_1_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 1 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-13",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260313-1005-1Hz_1500H_Hz_500_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 500 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-13",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260313-1045-500Hz",
+          "test_type": "Manual, constant frequency = 500Hz",
+          "description": "",
+          "success": null,
+          "date": "2025-03-13",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260313-1057-1Hz_1500H_Hz_1_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 1 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-13",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
+        },
+        {
+          "folder": "20260313-1105-1Hz_1500H_Hz_60_seconds",
+          "test_type": "Sweep. 1Hz -1500Hz. Sweep duration 60 seconds.",
+          "description": "",
+          "success": null,
+          "date": "2025-03-13",
+          "author": "OS",
+          "voltage": "2.5V",
+          "notes": ""
         }
       ],
       "description": "Pump 020326",
       "notes": "",
-      "sub_groups": {},
+      "sub_groups": {
+        "Japan set 1": {
+          "name": "Japan set 1",
+          "tests": [
+            "20260313-1001-1Hz_1500H_Hz_1_seconds",
+            "20260313-1005-1Hz_1500H_Hz_500_seconds",
+            "20260313-1045-500Hz"
+          ],
+          "description": "Set of tests for Japan."
+        }
+      },
       "created_at": "2026-03-10T12:37:22+00:00"
     },
     "Pump 2 - Niels": {

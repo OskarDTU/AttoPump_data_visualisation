@@ -19,6 +19,74 @@
       "show_individual_tests": false,
       "selection_mode": "sub_groups",
       "saved_at": "2026-03-10T16:59:05+00:00"
+    },
+    "Japan tests - all 5 pumps": {
+      "title": "Japan pumps - all 5 pumps",
+      "author": "OS",
+      "entry_ids": [
+        "__pump_sub_group__::PUMP+270226-1::Japan+set+3+-+final",
+        "__pump_sub_group__::PUMP+270226-2::Verifying+performance+for+Japan",
+        "__pump_sub_group__::PUMP+270226-3::Japan+set+2",
+        "__pump_sub_group__::PUMP+270226-4::Japan+test+set",
+        "__pump_sub_group__::Pump+020326::Japan+set+1"
+      ],
+      "comparisons": [
+        "sweep_overlay",
+        "global_average",
+        "constant_time_series",
+        "raw_points",
+        "correlation"
+      ],
+      "notes": "Report of the characterisation of all 5 pumps that were built for Japan.",
+      "bin_hz": 5.0,
+      "avg_bin_hz": 3.0,
+      "show_error_bars": false,
+      "show_individual_tests": false,
+      "show_raw_all_sweeps": false,
+      "plot_mode": "lines+markers",
+      "plot_modes": {
+        "sweep_overlay_target": "lines+markers",
+        "sweep_overlay_tests": "lines+markers",
+        "sweep_relative_target": "lines+markers",
+        "sweep_relative_tests": "lines+markers",
+        "individual_binned": "lines+markers",
+        "individual_per_sweep": "lines+markers",
+        "individual_raw_all_sweeps": "markers",
+        "global_average": "lines+markers",
+        "constant_time_series": "lines+markers",
+        "raw_points": "lines+markers"
+      },
+      "marker_size": 6,
+      "opacity": 0.8,
+      "max_raw_points": 50000,
+      "mean_threshold_pct": 75,
+      "std_threshold_pct": 10,
+      "sweep_axis": {
+        "x_min": null,
+        "x_max": null,
+        "y_min": null,
+        "y_max": null
+      },
+      "relative_axis": {
+        "x_min": null,
+        "x_max": null,
+        "y_min": null,
+        "y_max": null
+      },
+      "time_axis": {
+        "x_min": null,
+        "x_max": null,
+        "y_min": null,
+        "y_max": null
+      },
+      "variability_axis": {
+        "x_min": null,
+        "x_max": null,
+        "y_min": null,
+        "y_max": null
+      },
+      "selection_mode": "sub_groups",
+      "saved_at": "2026-03-14T08:57:14+00:00"
     }
   }
 }

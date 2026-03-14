@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import traceback
 from collections import OrderedDict
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote_plus, unquote_plus
@@ -31,16 +31,32 @@ import pandas as pd
 import streamlit as st
 
 from ..data.config import PLOT_BIN_WIDTH_HZ, PLOT_HEIGHT
+from ..data.cache_warmup import (
+    REPORT_WARMUP_JOB_KEY,
+    delete_warmup_job,
+    launch_warmup_worker,
+    load_warmup_job,
+    load_warmup_worker_state,
+    retry_failed_warmup_tasks,
+    run_report_warmup_job,
+    save_warmup_job,
+    set_warmup_job_paused,
+    start_report_warmup_job,
+    summarize_warmup_job,
+    summarize_warmup_worker_state,
+)
 from ..data.data_processor import (
     explain_frequency_bin_recommendation,
     format_bin_choice_label,
     recommend_frequency_bin_widths,
 )
 from ..data.loader import (
+    get_test_cache_context,
     load_and_classify_tests,
     load_prepared_test_data,
     resolve_data_path,
 )
+from ..data.persistent_cache import get_or_create_cached_test_figure
 from ..data.pump_registry import (
     Pump,
     PumpSubGroup,
@@ -132,6 +148,98 @@ _DEFAULT_REPORT_COMPARISONS = [
     "boxplots",
     "constant_time_series",
 ]
+_PLOT_MODE_OPTIONS = ["lines+markers", "lines", "markers"]
+_REPORT_PLOT_MODE_LABELS: OrderedDict[str, str] = OrderedDict(
+    [
+        ("sweep_overlay_target", "Frequency Sweep — Report Target Comparison"),
+        ("sweep_overlay_tests", "Frequency Sweep — All Tests Overlay"),
+        ("sweep_relative_target", "Relative Sweep (0–100 %) — Report Target Comparison"),
+        ("sweep_relative_tests", "Relative Sweep (0–100 %) — All Tests"),
+        ("individual_binned", "Individual Sweeps — Binned Mean"),
+        ("individual_per_sweep", "Individual Sweeps — Per-Sweep Breakdown"),
+        ("individual_raw_all_sweeps", "Individual Sweeps — Raw All-Sweeps Layer"),
+        ("global_average", "Global Average Across Tests"),
+        ("constant_time_series", "Constant-Frequency Flow vs Time"),
+        ("raw_points", "All Raw Sweep Points"),
+    ]
+)
+_DEFAULT_REPORT_PLOT_MODES = {
+    key: "lines+markers" for key in _REPORT_PLOT_MODE_LABELS
+}
+_DEFAULT_REPORT_PLOT_MODES["individual_raw_all_sweeps"] = "markers"
+_DEFAULT_REPORT_PLOT_MODES["raw_points"] = "markers"
+
+
+def _report_plot_mode_state_key(plot_key: str) -> str:
+    """Return the Streamlit widget key for one report plot-mode control."""
+    return f"rb_mode_{plot_key}"
+
+
+def _normalize_report_plot_mode(mode: object) -> str:
+    """Coerce any stored plot mode onto the supported report options."""
+    return str(mode) if str(mode) in _PLOT_MODE_OPTIONS else "lines+markers"
+
+
+def _default_report_plot_mode_widgets() -> dict[str, str]:
+    """Return per-plot mode defaults for a new report."""
+    return {
+        _report_plot_mode_state_key(plot_key): mode
+        for plot_key, mode in _DEFAULT_REPORT_PLOT_MODES.items()
+    }
+
+
+def _report_plot_mode_widgets_from_definition(
+    defn: ReportDefinition,
+) -> dict[str, str]:
+    """Return per-plot mode widget values for a loaded report template."""
+    return {
+        _report_plot_mode_state_key(plot_key): _normalize_report_plot_mode(
+            defn.plot_modes.get(plot_key, defn.plot_mode)
+        )
+        for plot_key in _REPORT_PLOT_MODE_LABELS
+    }
+
+
+def _active_report_plot_mode_keys(
+    selected_comparisons: list[str],
+    *,
+    include_raw_all_sweeps: bool,
+) -> list[str]:
+    """List the plot-mode controls relevant to the current report selection."""
+    keys: list[str] = []
+    if "sweep_overlay" in selected_comparisons:
+        keys.extend(["sweep_overlay_target", "sweep_overlay_tests"])
+    if "sweep_relative" in selected_comparisons:
+        keys.extend(["sweep_relative_target", "sweep_relative_tests"])
+    if "individual_sweeps" in selected_comparisons:
+        keys.extend(["individual_binned", "individual_per_sweep"])
+        if include_raw_all_sweeps:
+            keys.append("individual_raw_all_sweeps")
+    if "global_average" in selected_comparisons:
+        keys.append("global_average")
+    if "constant_time_series" in selected_comparisons:
+        keys.append("constant_time_series")
+    if "raw_points" in selected_comparisons:
+        keys.append("raw_points")
+    return keys
+
+
+def _collect_report_plot_modes() -> dict[str, str]:
+    """Collect the current per-plot mode settings from session state."""
+    return {
+        plot_key: _normalize_report_plot_mode(
+            st.session_state.get(
+                _report_plot_mode_state_key(plot_key),
+                _DEFAULT_REPORT_PLOT_MODES[plot_key],
+            )
+        )
+        for plot_key in _REPORT_PLOT_MODE_LABELS
+    }
+
+
+def _resolve_report_plot_mode(defn: ReportDefinition, plot_key: str) -> str:
+    """Resolve the mode used for one concrete report plot family."""
+    return _normalize_report_plot_mode(defn.plot_modes.get(plot_key, defn.plot_mode))
 
 
 def _format_optional_numeric(value: float | None) -> str:
@@ -239,9 +347,12 @@ def _template_widget_defaults(
             "rb_comparisons": list(_DEFAULT_REPORT_COMPARISONS),
             "rb_plot_bin": 5.0,
             "rb_avg_bin": 3.0,
+            "rb_auto_avg_bin": True,
             "rb_err": True,
             "rb_indiv": False,
             "rb_raw_all_sweeps": True,
+            "rb_overlay_entries": [],
+            "rb_overlay_sweep_drilldown": False,
             "rb_mode": "lines+markers",
             "rb_marker_size": 6,
             "rb_opacity": 0.8,
@@ -249,6 +360,7 @@ def _template_widget_defaults(
             "rb_best_mean": 75,
             "rb_best_std": 10,
         }
+        defaults.update(_default_report_plot_mode_widgets())
         defaults.update(_axis_defaults("rb_sweep_axis", AxisBounds()))
         defaults.update(_axis_defaults("rb_relative_axis", AxisBounds()))
         defaults.update(_axis_defaults("rb_time_axis", AxisBounds()))
@@ -274,9 +386,12 @@ def _template_widget_defaults(
         ] or list(_DEFAULT_REPORT_COMPARISONS),
         "rb_plot_bin": float(loaded_defn.bin_hz),
         "rb_avg_bin": float(loaded_defn.avg_bin_hz),
+        "rb_auto_avg_bin": bool(loaded_defn.auto_use_recommended_avg_bin),
         "rb_err": bool(loaded_defn.show_error_bars),
         "rb_indiv": bool(loaded_defn.show_individual_tests),
         "rb_raw_all_sweeps": bool(loaded_defn.show_raw_all_sweeps),
+        "rb_overlay_entries": list(loaded_defn.overlay_entry_ids),
+        "rb_overlay_sweep_drilldown": bool(loaded_defn.overlay_include_sweep_drilldown),
         "rb_mode": loaded_defn.plot_mode,
         "rb_marker_size": int(loaded_defn.marker_size),
         "rb_opacity": float(loaded_defn.opacity),
@@ -284,6 +399,7 @@ def _template_widget_defaults(
         "rb_best_mean": int(loaded_defn.mean_threshold_pct),
         "rb_best_std": int(loaded_defn.std_threshold_pct),
     }
+    defaults.update(_report_plot_mode_widgets_from_definition(loaded_defn))
     defaults.update(_axis_defaults("rb_sweep_axis", loaded_defn.sweep_axis))
     defaults.update(_axis_defaults("rb_relative_axis", loaded_defn.relative_axis))
     defaults.update(_axis_defaults("rb_time_axis", loaded_defn.time_axis))
@@ -362,6 +478,36 @@ def _reset_report_plot_bin() -> None:
         st.session_state["rb_plot_bin"] = float(recommendation["test_bin_hz"])
 
 
+def _comparisons_use_average_bin(selected_comparisons: list[str]) -> bool:
+    """Return whether the current report needs the averaging bin."""
+    return bool(set(selected_comparisons) & {"sweep_overlay", "sweep_relative", "global_average"})
+
+
+def _ensure_report_bin_recommendation(
+    *,
+    selected_folders: list[str],
+    run_names: list[str],
+    run_dirs: list[Path],
+) -> dict[str, float] | None:
+    """Load or calculate the cached recommendation for the current selection."""
+    recommendation = st.session_state.get("_rb_bin_recommendation")
+    if recommendation is not None:
+        return recommendation
+    if not selected_folders:
+        return None
+
+    recommendation = _recommend_report_bin_cached(
+        tuple(sorted(set(selected_folders))),
+        tuple(run_names),
+        tuple(str(path) for path in run_dirs),
+    )
+    if recommendation:
+        st.session_state["_rb_bin_recommendation"] = recommendation
+    else:
+        st.session_state.pop("_rb_bin_recommendation", None)
+    return recommendation
+
+
 def _build_report_target_options(
     reg: PumpRegistry,
     run_names: list[str],
@@ -384,6 +530,153 @@ def _build_report_target_options(
                 f"{pump.name} ({available}/{len(pump.tests)} tests available)"
             )
     return options
+
+
+def _normalize_report_selected_entries(
+    widget_value: object,
+    session_value: object,
+    valid_options: Mapping[str, str],
+) -> list[str]:
+    """Normalize report-target selections from widget and session state."""
+
+    def _coerce(raw: object) -> list[str]:
+        if isinstance(raw, (list, tuple, set)):
+            values = list(raw)
+        elif raw in {None, ""}:
+            values = []
+        else:
+            values = [raw]
+        normalized: list[str] = []
+        for item in values:
+            key = str(item)
+            if key in valid_options and key not in normalized:
+                normalized.append(key)
+        return normalized
+
+    widget_selected = _coerce(widget_value)
+    session_selected = _coerce(session_value)
+    if widget_selected:
+        return widget_selected
+    return session_selected
+
+
+def _collect_report_target_folders(
+    entry_ids: list[str],
+    reg: PumpRegistry,
+    run_names: list[str],
+) -> list[str]:
+    """Resolve the selected report targets into the underlying test folders."""
+    folders: list[str] = []
+    for entry_id in entry_ids:
+        resolved = _resolve_report_entry(entry_id, reg, run_names)
+        if resolved is None:
+            continue
+        _, entry_folders, _ = resolved
+        folders.extend(entry_folders)
+    return folders
+
+
+def _normalize_overlay_selected_entries(
+    selected_entries: list[str],
+    target_options: Mapping[str, str],
+) -> list[str]:
+    """Keep overlay-target focus state valid for the current report selection."""
+    available_overlay_options = {
+        entry_id: target_options[entry_id]
+        for entry_id in selected_entries
+        if entry_id in target_options
+    }
+    overlay_selected = _normalize_report_selected_entries(
+        st.session_state.get("rb_overlay_entries", []),
+        st.session_state.get("rb_overlay_entries", []),
+        available_overlay_options,
+    )
+    if not overlay_selected and selected_entries:
+        overlay_selected = (
+            list(selected_entries[:1]) if len(selected_entries) > 1 else list(selected_entries)
+        )
+    if st.session_state.get("rb_overlay_entries") != overlay_selected:
+        st.session_state["rb_overlay_entries"] = list(overlay_selected)
+    return overlay_selected
+
+
+def _build_common_grid_binned_sweeps(
+    test_sweeps: dict[str, pd.DataFrame],
+    *,
+    signal_col: str,
+    bin_hz: float,
+) -> dict[str, pd.DataFrame]:
+    """Bin raw sweep data directly onto one shared averaging grid."""
+    cleaned_frames: dict[str, pd.DataFrame] = {}
+    fmin_values: list[float] = []
+    fmax_values: list[float] = []
+
+    for name, sweep_df in test_sweeps.items():
+        if (
+            sweep_df is None
+            or sweep_df.empty
+            or "Frequency" not in sweep_df.columns
+            or signal_col not in sweep_df.columns
+        ):
+            continue
+
+        working = sweep_df.copy()
+        if "IsFrequencyHold" in working.columns:
+            working = working.loc[~working["IsFrequencyHold"]].copy()
+        if working.empty:
+            continue
+
+        working["Frequency"] = pd.to_numeric(working["Frequency"], errors="coerce")
+        working[signal_col] = pd.to_numeric(working[signal_col], errors="coerce")
+        working = working.loc[
+            np.isfinite(working["Frequency"]) & np.isfinite(working[signal_col])
+        ].copy()
+        if len(working) < 2:
+            continue
+
+        freq_values = working["Frequency"].to_numpy(dtype=float)
+        fmin = float(np.nanmin(freq_values))
+        fmax = float(np.nanmax(freq_values))
+        if not np.isfinite(fmin) or not np.isfinite(fmax) or fmax <= fmin:
+            continue
+
+        cleaned_frames[name] = working
+        fmin_values.append(fmin)
+        fmax_values.append(fmax)
+
+    if not cleaned_frames:
+        return {}
+
+    global_fmin = min(fmin_values)
+    global_fmax = max(fmax_values)
+    edges = np.arange(global_fmin, global_fmax + float(bin_hz), float(bin_hz))
+    if len(edges) < 2:
+        edges = np.array([global_fmin, global_fmax], dtype=float)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+
+    common_grid: dict[str, pd.DataFrame] = {}
+    for name, working in cleaned_frames.items():
+        freq_values = working["Frequency"].to_numpy(dtype=float)
+        signal_values = working[signal_col].to_numpy(dtype=float)
+        bin_ids = np.digitize(freq_values, edges) - 1
+        bin_ids = np.clip(bin_ids, 0, len(edges) - 2)
+        grouped = (
+            pd.DataFrame({"bin": bin_ids, "value": signal_values})
+            .groupby("bin")
+            .agg(
+                mean=("value", "mean"),
+                std=("value", "std"),
+                count=("value", "count"),
+            )
+            .reset_index()
+        )
+        grouped["std"] = grouped["std"].fillna(0)
+        grouped["freq_center"] = grouped["bin"].map(
+            lambda idx, grid=centers: float(grid[int(idx)]) if int(idx) < len(grid) else float(global_fmax)
+        )
+        common_grid[name] = grouped.sort_values("freq_center").reset_index(drop=True)
+
+    return common_grid
 
 
 def _render_pump_sub_groups(
@@ -493,6 +786,30 @@ def _build_guided_section_description(plot_id: str, *parts: str) -> str:
     return _build_section_description(build_plot_guide_text(plot_id), *parts)
 
 
+def _split_report_section_description(description: str) -> tuple[str, str]:
+    """Split long report section text into a visible subtitle and detail."""
+    paragraphs = [part.strip() for part in str(description or "").split("\n\n") if part.strip()]
+    if not paragraphs:
+        return "", ""
+    priority_prefixes = (
+        "What you are seeing:",
+        "Tabulated",
+        "Summary:",
+        "What this table shows:",
+    )
+    subtitle_index = next(
+        (
+            idx
+            for idx, paragraph in enumerate(paragraphs)
+            if paragraph.startswith(priority_prefixes)
+        ),
+        0,
+    )
+    subtitle = paragraphs.pop(subtitle_index)
+    details = "\n\n".join(paragraphs)
+    return subtitle, details
+
+
 def _format_flat_test_listing(test_names: list[str]) -> str:
     """Render a compact list of included test names."""
     if not test_names:
@@ -513,11 +830,298 @@ def _format_nested_test_listing(targets: dict[str, dict[str, pd.DataFrame]]) -> 
     return "\n".join(lines)
 
 
+def _format_overlay_scope_suffix(
+    focused_targets: list[str],
+    *,
+    total_target_count: int,
+) -> str:
+    """Build a compact title suffix describing the focused overlay scope."""
+    if not focused_targets:
+        return ""
+    if len(focused_targets) == 1:
+        return f" — {focused_targets[0]}"
+    if len(focused_targets) == total_target_count:
+        return ""
+    return f" — {len(focused_targets)} focused targets"
+
+
 def _prepare_average_overlay(binned_df: pd.DataFrame) -> pd.DataFrame:
     """Adapt a binned sweep DataFrame for the raw all-sweeps overlay."""
     overlay = binned_df.rename(columns={"freq_center": "freq"})
     overlay = overlay[[col for col in ["freq", "mean", "std"] if col in overlay.columns]].copy()
     return overlay
+
+
+def _downsample_frame_evenly(
+    df: pd.DataFrame,
+    max_points: int | None,
+) -> pd.DataFrame:
+    """Reduce large plot payloads while preserving the full x-range."""
+    if (
+        max_points is None
+        or max_points <= 0
+        or df.empty
+        or len(df) <= int(max_points)
+    ):
+        return df
+    idx = np.linspace(0, len(df) - 1, num=int(max_points), dtype=int)
+    return df.iloc[np.unique(idx)].copy()
+
+
+def _get_cached_test_figure(
+    *,
+    cache_context: dict[str, object] | None,
+    plot_kind: str,
+    settings: dict[str, object],
+    builder,
+):
+    """Load a persisted test figure when possible, else build it once."""
+    fig, _ = get_or_create_cached_test_figure(
+        cache_context=cache_context,
+        plot_kind=plot_kind,
+        settings=settings,
+        builder=builder,
+    )
+    return fig
+
+
+def _build_report_warmup_profile(defn: ReportDefinition) -> dict[str, object]:
+    """Return the persisted warm-up settings for the current report draft."""
+    return {
+        "report": {
+            "comparisons": list(defn.comparisons),
+            "bin_hz": float(defn.bin_hz),
+            "max_raw_points": int(defn.max_raw_points),
+            "marker_size": int(defn.marker_size),
+            "opacity": float(defn.opacity),
+            "show_error_bars": bool(defn.show_error_bars),
+            "show_raw_all_sweeps": bool(defn.show_raw_all_sweeps),
+            "plot_modes": {
+                "individual_binned": _resolve_report_plot_mode(defn, "individual_binned"),
+                "individual_per_sweep": _resolve_report_plot_mode(defn, "individual_per_sweep"),
+                "individual_raw_all_sweeps": _resolve_report_plot_mode(
+                    defn,
+                    "individual_raw_all_sweeps",
+                ),
+                "constant_time_series": _resolve_report_plot_mode(
+                    defn,
+                    "constant_time_series",
+                ),
+            },
+        }
+    }
+
+
+def _render_report_warmup_controls(
+    *,
+    defn: ReportDefinition,
+    selected_entries: list[str],
+    selected_folders: list[str],
+    data_folder_str: str,
+) -> None:
+    """Render persistent warm-up controls for the current report selection."""
+    warmup_job = load_warmup_job(REPORT_WARMUP_JOB_KEY)
+    warmup_summary = summarize_warmup_job(warmup_job)
+    worker_state = load_warmup_worker_state(REPORT_WARMUP_JOB_KEY)
+    worker_summary = summarize_warmup_worker_state(worker_state)
+    default_auto_resume = bool(
+        True if warmup_job is None else warmup_job.get("auto_resume", True)
+    )
+
+    has_selected_tests = bool(selected_folders)
+
+    with st.sidebar:
+        st.divider()
+        st.subheader("⚡ Overnight Cache")
+        st.caption(
+            "Build the expensive per-test report plots once, store them on disk, "
+            "and reuse them across app restarts."
+        )
+        st.caption(
+            "Use the overnight option to queue the current selection and let a "
+            "detached worker keep filling the cache even after you close the browser."
+        )
+        if not has_selected_tests:
+            st.caption(
+                "Select at least one report target with available tests to enable "
+                "new overnight warm-up jobs."
+            )
+        auto_resume = st.checkbox(
+            "Resume unfinished cache warm-up automatically when this page opens",
+            value=default_auto_resume,
+            key="rb_warmup_auto_resume",
+        )
+        if warmup_job and warmup_job.get("auto_resume", True) != bool(auto_resume):
+            warmup_job["auto_resume"] = bool(auto_resume)
+            save_warmup_job(warmup_job, job_key=REPORT_WARMUP_JOB_KEY)
+            warmup_summary = summarize_warmup_job(warmup_job)
+
+        start_label = (
+            "Queue selected tests for warm-up"
+            if not warmup_job
+            else "Replace queued warm-up with current selection"
+        )
+        start_bg_label = (
+            "Start overnight warm-up for selected tests"
+            if not warmup_job
+            else "Replace and start overnight warm-up"
+        )
+        if worker_summary.get("running"):
+            st.info(
+                "A background warm-up worker is already running. Pause it before "
+                "replacing the queued selection."
+            )
+
+        c_start_bg, c_start_queue = st.columns(2)
+        with c_start_bg:
+            if st.button(
+                start_bg_label,
+                key="rb_warmup_start_bg",
+                disabled=worker_summary.get("running", False) or not has_selected_tests,
+                use_container_width=True,
+            ):
+                start_report_warmup_job(
+                    label=f"Report cache warm-up ({len(selected_folders)} tests)",
+                    entry_ids=list(selected_entries),
+                    test_names=list(selected_folders),
+                    selection_mode=str(defn.selection_mode),
+                    profile=_build_report_warmup_profile(defn),
+                    data_folder_path=data_folder_str,
+                    auto_resume=bool(auto_resume),
+                    job_key=REPORT_WARMUP_JOB_KEY,
+                )
+                try:
+                    launch_warmup_worker(REPORT_WARMUP_JOB_KEY)
+                except Exception as exc:
+                    st.error(f"Could not start the overnight worker: {exc}")
+                else:
+                    st.rerun()
+        with c_start_queue:
+            if st.button(
+                start_label,
+                key="rb_warmup_start",
+                disabled=worker_summary.get("running", False) or not has_selected_tests,
+                use_container_width=True,
+            ):
+                start_report_warmup_job(
+                    label=f"Report cache warm-up ({len(selected_folders)} tests)",
+                    entry_ids=list(selected_entries),
+                    test_names=list(selected_folders),
+                    selection_mode=str(defn.selection_mode),
+                    profile=_build_report_warmup_profile(defn),
+                    data_folder_path=data_folder_str,
+                    auto_resume=bool(auto_resume),
+                    job_key=REPORT_WARMUP_JOB_KEY,
+                )
+                st.rerun()
+
+        if worker_state:
+            status_label = str(worker_summary.get("status", "idle")).replace("_", " ").title()
+            if worker_summary.get("running"):
+                st.caption(
+                    f"Background worker: {status_label} · PID {worker_summary.get('pid')} · "
+                    f"last heartbeat {worker_summary.get('last_heartbeat') or 'just now'}"
+                )
+            elif worker_summary.get("stale"):
+                st.warning(
+                    "The overnight worker stopped unexpectedly. Relaunch it and it will "
+                    "continue from the tasks already completed on disk."
+                )
+            elif worker_summary.get("status") not in {"idle", ""}:
+                detail = worker_summary.get("finished_at") or worker_summary.get("last_heartbeat") or "unknown time"
+                st.caption(f"Background worker: {status_label} · last update {detail}")
+
+            if worker_summary.get("error"):
+                st.warning(worker_summary["error"])
+            if worker_summary.get("log_path"):
+                st.caption(f"Worker log: `{worker_summary['log_path']}`")
+
+        if warmup_job:
+            selection = warmup_job.get("selection", {})
+            test_names = list(selection.get("test_names", []))
+            st.caption(
+                f"Current job: {len(test_names)} test(s), "
+                f"{warmup_summary['completed']}/{warmup_summary['total']} task(s) done."
+            )
+            progress = (
+                float(warmup_summary["completed"]) / float(warmup_summary["total"])
+                if warmup_summary["total"]
+                else 0.0
+            )
+            st.progress(
+                progress,
+                text=(
+                    "Paused"
+                    if warmup_summary.get("paused")
+                    else (
+                        "Completed"
+                        if warmup_summary.get("complete")
+                        else "Running"
+                    )
+                ),
+            )
+
+            if warmup_summary.get("paused") and worker_summary.get("running"):
+                st.caption("Pause requested. The background worker will stop after the current task finishes.")
+
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                if st.button(
+                    (
+                        "Resume in background"
+                        if warmup_summary.get("paused")
+                        else "Run current job in background"
+                    ),
+                    key="rb_warmup_run_bg",
+                    disabled=(
+                        worker_summary.get("running", False)
+                        or warmup_summary["pending"] == 0
+                    ),
+                ):
+                    if warmup_summary.get("paused"):
+                        set_warmup_job_paused(False, REPORT_WARMUP_JOB_KEY)
+                    try:
+                        launch_warmup_worker(REPORT_WARMUP_JOB_KEY)
+                    except Exception as exc:
+                        st.error(f"Could not start the overnight worker: {exc}")
+                    else:
+                        st.rerun()
+            with c2:
+                if warmup_summary.get("paused"):
+                    if st.button("Resume", key="rb_warmup_resume"):
+                        set_warmup_job_paused(False, REPORT_WARMUP_JOB_KEY)
+                        st.rerun()
+                else:
+                    if st.button(
+                        "Pause",
+                        key="rb_warmup_pause",
+                        disabled=not warmup_summary.get("active", False),
+                    ):
+                        set_warmup_job_paused(True, REPORT_WARMUP_JOB_KEY)
+                        st.rerun()
+            with c3:
+                if st.button(
+                    "Retry failed",
+                    key="rb_warmup_retry",
+                    disabled=warmup_summary["errors"] == 0,
+                ):
+                    retry_failed_warmup_tasks(REPORT_WARMUP_JOB_KEY)
+                    st.rerun()
+            with c4:
+                if st.button("Clear job", key="rb_warmup_clear"):
+                    delete_warmup_job(REPORT_WARMUP_JOB_KEY)
+                    st.rerun()
+
+            if warmup_summary["errors"]:
+                with st.expander(
+                    f"{warmup_summary['errors']} failed task(s)",
+                    expanded=False,
+                ):
+                    for task in warmup_job.get("tasks", []):
+                        if task.get("status") == "error":
+                            st.warning(
+                                f"{task.get('label', 'Task')}: {task.get('error', 'Unknown error')}"
+                            )
 
 
 def _time_axis_seconds(series: pd.Series) -> tuple[pd.Series, str]:
@@ -672,20 +1276,137 @@ def _apply_axis_bounds(fig, axis_bounds: AxisBounds) -> None:
         fig.update_yaxes(range=[axis_bounds.y_min, axis_bounds.y_max])
 
 
+def _compact_trace_label(label: object, *, max_len: int = 56) -> str:
+    """Shorten long legend labels without losing the distinguishing suffix."""
+    text = str(label or "").strip()
+    if len(text) <= max_len:
+        return text
+    prefix = max(18, int(max_len * 0.55))
+    suffix = max(14, max_len - prefix - 5)
+    return f"{text[:prefix].rstrip()} ... {text[-suffix:].lstrip()}"
+
+
+def _scatter_trace_indices(fig) -> list[int]:
+    """Return the trace indices eligible for line/marker style toggles."""
+    indices: list[int] = []
+    for idx, trace in enumerate(fig.data):
+        if getattr(trace, "type", None) not in {"scatter", "scattergl"}:
+            continue
+        mode = getattr(trace, "mode", None)
+        if mode is None:
+            continue
+        indices.append(idx)
+    return indices
+
+
+def _supports_report_style_toggle(fig) -> bool:
+    """Return whether an exported report figure should expose mode controls."""
+    x_title = str(getattr(getattr(fig.layout.xaxis, "title", None), "text", "") or "")
+    return bool(x_title) and any(
+        token in x_title.lower() for token in ("frequency", "time")
+    )
+
+
+def _add_report_style_toggle(fig) -> None:
+    """Embed a Plotly dropdown so exported report users can change curve style."""
+    trace_indices = _scatter_trace_indices(fig)
+    if not trace_indices or not _supports_report_style_toggle(fig):
+        return
+
+    first_mode = str(getattr(fig.data[trace_indices[0]], "mode", "") or "")
+    active = _PLOT_MODE_OPTIONS.index(first_mode) if first_mode in _PLOT_MODE_OPTIONS else 0
+    existing = list(fig.layout.updatemenus) if fig.layout.updatemenus else []
+    existing.append(
+        {
+            "type": "dropdown",
+            "direction": "down",
+            "x": 1.0,
+            "y": 1.18,
+            "xanchor": "right",
+            "yanchor": "top",
+            "showactive": True,
+            "active": active,
+            "buttons": [
+                {
+                    "label": {
+                        "lines+markers": "Lines + markers",
+                        "lines": "Lines",
+                        "markers": "Markers",
+                    }[mode],
+                    "method": "restyle",
+                    "args": [{"mode": mode}, trace_indices],
+                }
+                for mode in _PLOT_MODE_OPTIONS
+            ],
+            "bgcolor": "rgba(255,255,255,0.94)",
+            "bordercolor": "#cfd4da",
+            "font": {"size": 11},
+            "pad": {"l": 4, "r": 4, "t": 0, "b": 0},
+        }
+    )
+    fig.update_layout(updatemenus=existing)
+
+
+def _apply_report_plot_layout(fig) -> None:
+    """Normalize report-plot spacing so axes and legends stay readable."""
+    legend_names = [
+        str(getattr(trace, "name", "") or "").strip()
+        for trace in fig.data
+        if getattr(trace, "showlegend", True) is not False
+    ]
+    multi_legend = len([name for name in legend_names if name]) > 1
+    long_legend = any(len(name) > 48 for name in legend_names if name)
+
+    for trace in fig.data:
+        name = str(getattr(trace, "name", "") or "").strip()
+        if name and len(name) > 48:
+            trace.name = _compact_trace_label(name)
+
+    bottom_margin = 96 if multi_legend else 72
+    if multi_legend:
+        bottom_margin = 124 if long_legend else 108
+
+    fig.update_layout(
+        margin=dict(l=92, r=36, t=92, b=bottom_margin),
+        title=dict(x=0.5, xanchor="center"),
+        hoverlabel=dict(namelength=-1),
+    )
+    fig.update_xaxes(automargin=True, title_standoff=18)
+    fig.update_yaxes(automargin=True, title_standoff=18)
+
+    if multi_legend:
+        fig.update_layout(
+            legend=dict(
+                orientation="h",
+                x=0.0,
+                xanchor="left",
+                y=-0.22,
+                yanchor="top",
+                font=dict(size=10),
+                itemclick="toggle",
+                itemdoubleclick="toggleothers",
+            )
+        )
+
+    _add_report_style_toggle(fig)
+
+
 def _format_render_context(
     defn: ReportDefinition,
     *,
+    plot_mode: str | None = None,
     axis_bounds: AxisBounds | None = None,
     x_name: str = "x",
     y_name: str = "y",
     include_opacity: bool = True,
 ) -> str:
     """Summarize shared rendering settings for report figures."""
+    effective_mode = _normalize_report_plot_mode(plot_mode or defn.plot_mode)
     mode_label = {
         "lines": "lines",
         "markers": "markers",
         "lines+markers": "lines + markers",
-    }.get(defn.plot_mode, defn.plot_mode)
+    }.get(effective_mode, effective_mode)
     parts = [
         f"plot mode = {mode_label}",
         f"marker size = {int(defn.marker_size)} px",
@@ -701,12 +1422,15 @@ def _format_sweep_plot_context(
     defn: ReportDefinition,
     *,
     use_average_bin: bool = False,
+    include_test_bin: bool = True,
     include_individual_tests: bool | None = None,
     raw_layer_enabled: bool | None = None,
     axis_bounds: AxisBounds | None = None,
 ) -> str:
     """Summarize the key report settings that govern a sweep-based figure."""
-    parts = [f"per-test frequency bin width = {defn.bin_hz:g} Hz"]
+    parts: list[str] = []
+    if include_test_bin:
+        parts.append(f"per-test frequency bin width = {defn.bin_hz:g} Hz")
     if use_average_bin:
         parts.append(
             f"cross-test / cross-target averaging bin width = {defn.avg_bin_hz:g} Hz"
@@ -942,7 +1666,7 @@ def main() -> None:
             _render_registry_tab(run_names, run_dirs)
 
         with tab_build:
-            _render_build_tab(run_names, run_dirs)
+            _render_build_tab(data_folder_str, run_names, run_dirs)
 
         with tab_audit:
             _render_audit_tab()
@@ -1142,7 +1866,7 @@ def _render_registry_tab(run_names: list[str], run_dirs: list) -> None:
 # TAB 2 — BUILD REPORT
 # ════════════════════════════════════════════════════════════════════════
 
-def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
+def _render_build_tab(data_folder_str: str, run_names: list[str], run_dirs: list) -> None:
     """Report composition: select entries, choose charts, preview, export."""
     reg = _get_registry()
 
@@ -1255,6 +1979,13 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
         format_func=lambda entry_id: target_options.get(entry_id, entry_id),
         key=entries_widget_key,
     )
+    selected_entries = _normalize_report_selected_entries(
+        selected_entries,
+        st.session_state.get(entries_widget_key),
+        target_options,
+    )
+    if st.session_state.get(entries_widget_key) != selected_entries:
+        st.session_state[entries_widget_key] = list(selected_entries)
 
     # Quick select buttons
     c1, c2 = st.columns([1, 1])
@@ -1271,40 +2002,20 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
         st.info("👆 Select at least one report target to continue.")
         return
 
-    if load_choice == "(new report)":
-        selected_folders: list[str] = []
-        for entry_id in selected_entries:
-            resolved = _resolve_report_entry(entry_id, reg, run_names)
-            if resolved is None:
-                continue
-            _, folders, _ = resolved
-            selected_folders.extend(folders)
-        bin_signature = (
-            "report_builder",
-            tuple(sorted(selected_entries)),
-            tuple(sorted(selected_folders)),
-        )
-        if st.session_state.get("_rb_bin_signature") != bin_signature:
-            recommendation = _recommend_report_bin_cached(
-                tuple(sorted(set(selected_folders))),
-                tuple(run_names),
-                tuple(str(path) for path in run_dirs),
-            )
-            if recommendation:
-                if int(recommendation.get("test_series_count", 0)) >= 2:
-                    st.session_state["rb_plot_bin"] = recommendation["test_bin_hz"]
-                if int(recommendation.get("average_series_count", 0)) >= 2:
-                    st.session_state["rb_avg_bin"] = recommendation["average_bin_hz"]
-                st.session_state["_rb_bin_signature"] = bin_signature
-                st.session_state["_rb_bin_recommendation"] = recommendation
-            else:
-                st.session_state.pop("_rb_bin_recommendation", None)
-                st.session_state["_rb_bin_signature"] = bin_signature
+    selected_folders = _collect_report_target_folders(selected_entries, reg, run_names)
+    bin_signature = (
+        "report_builder",
+        tuple(sorted(selected_entries)),
+        tuple(sorted(selected_folders)),
+    )
+    if st.session_state.get("_rb_bin_signature") != bin_signature:
+        st.session_state["_rb_bin_signature"] = bin_signature
+        st.session_state.pop("_rb_bin_recommendation", None)
 
     st.caption(
         f"Selected {len(selected_entries)} report target(s) with "
         f"{sum(1 for entry_id in selected_entries if entry_id in target_options)} currently available."
-    )
+        )
 
     # ── Comparison types ────────────────────────────────────────
     left_col, right_col = st.columns([3.2, 1.8])
@@ -1328,8 +2039,34 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
             + ", ".join(COMPARISON_OPTIONS[c] for c in selected_comparisons)
         )
 
+    overlay_selected_entries = _normalize_overlay_selected_entries(
+        selected_entries,
+        target_options,
+    )
+
     # ── Plot settings ───────────────────────────────────────────
     with st.expander("⚙️ Plot settings", expanded=False):
+        st.caption(
+            "Recommended bin widths are available for any report. They are "
+            "calculated on demand here and are also reused automatically when "
+            "you generate average-style plots."
+        )
+        if st.button(
+            "Calculate recommended bin widths",
+            key="rb_calc_bin_recommendation",
+            disabled=not selected_folders,
+        ):
+            recommendation = _ensure_report_bin_recommendation(
+                selected_folders=selected_folders,
+                run_names=run_names,
+                run_dirs=run_dirs,
+            )
+            if recommendation:
+                st.session_state["_rb_bin_recommendation"] = recommendation
+            else:
+                st.session_state.pop("_rb_bin_recommendation", None)
+            st.rerun()
+
         plot_bin_hz = st.slider(
             "Per-test frequency bin width (Hz)",
             0.5,
@@ -1337,6 +2074,10 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
             value=float(st.session_state.get("rb_plot_bin", 5.0)),
             step=0.5,
             key="rb_plot_bin",
+            help=(
+                "Used for per-test sweep plots such as the all-tests overlay, "
+                "individual sweep means, and raw-sweep average overlays."
+            ),
         )
         avg_bin_hz = st.slider(
             "Cross-test averaging bin width (Hz)",
@@ -1345,6 +2086,19 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
             value=float(st.session_state.get("rb_avg_bin", 3.0)),
             step=0.5,
             key="rb_avg_bin",
+            help=(
+                "Used for the target-comparison and global-average plots. These "
+                "plots now bin raw sweep data directly on this grid."
+            ),
+        )
+        auto_use_recommended_avg_bin = st.checkbox(
+            "Automatically use the recommended averaging bin for average-style plots",
+            key="rb_auto_avg_bin",
+            help=(
+                "Applies to the report-target comparison, relative target "
+                "comparison, and global average. The per-test plot bin above is "
+                "not changed by this setting."
+            ),
         )
         show_err = st.checkbox("Show ±1 std error bars", key="rb_err")
         show_indiv = st.checkbox(
@@ -1355,11 +2109,59 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
             "Include raw all-sweeps layer for individual sweep diagnostics",
             key="rb_raw_all_sweeps",
         )
-        plot_mode = st.selectbox(
-            "Curve style",
-            ["lines+markers", "lines", "markers"],
-            key="rb_mode",
+        active_plot_mode_keys = _active_report_plot_mode_keys(
+            selected_comparisons,
+            include_raw_all_sweeps=show_raw_all_sweeps,
         )
+        if "sweep_overlay" in selected_comparisons:
+            overlay_target_options = {
+                entry_id: target_options[entry_id]
+                for entry_id in selected_entries
+                if entry_id in target_options
+            }
+            st.markdown("**Focused all-tests overlay**")
+            st.caption(
+                "This controls the crowded multi-test sweep overlay. Pick the "
+                "report targets whose individual tests you actually want to see "
+                "together. Choose one target if you want a readable single-pump "
+                "view, and turn on the drill-down option below to also get all "
+                "sweeps from those tests in one figure."
+            )
+            overlay_selected_entries = st.multiselect(
+                "Targets shown in 'Frequency Sweep — All Tests Overlay'",
+                list(overlay_target_options.keys()),
+                default=overlay_selected_entries,
+                format_func=lambda entry_id: overlay_target_options.get(entry_id, entry_id),
+                key="rb_overlay_entries",
+            )
+            overlay_selected_entries = _normalize_report_selected_entries(
+                overlay_selected_entries,
+                st.session_state.get("rb_overlay_entries", []),
+                overlay_target_options,
+            )
+            if not overlay_selected_entries and selected_entries:
+                overlay_selected_entries = list(selected_entries[:1])
+                st.session_state["rb_overlay_entries"] = list(overlay_selected_entries)
+            st.checkbox(
+                "Add per-target all-sweeps drill-down for the focused overlay targets",
+                key="rb_overlay_sweep_drilldown",
+                help=(
+                    "Adds an extra section per focused target where every sweep of "
+                    "every included test is shown together. Use this when you need "
+                    "to inspect sweep-to-sweep repeatability across a single pump "
+                    "or subgroup."
+                ),
+            )
+        if active_plot_mode_keys:
+            st.markdown("**Curve style per plot**")
+            columns = st.columns(2)
+            for idx, plot_key in enumerate(active_plot_mode_keys):
+                with columns[idx % 2]:
+                    st.selectbox(
+                        _REPORT_PLOT_MODE_LABELS[plot_key],
+                        _PLOT_MODE_OPTIONS,
+                        key=_report_plot_mode_state_key(plot_key),
+                    )
         marker_size = st.slider(
             "Marker size (px)",
             1,
@@ -1376,12 +2178,16 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
             key="rb_opacity",
         )
         max_raw_points = st.slider(
-            "Max raw points per test",
+            "Max plotted points per test",
             1000,
             500000,
             int(st.session_state.get("rb_maxpts", 50000)),
             1000,
             key="rb_maxpts",
+            help=(
+                "Caps dense raw/time-series traces in the report preview and "
+                "export so large reports stay responsive."
+            ),
         )
         best_mean_pct = st.slider(
             "Best-region high-flow %",
@@ -1400,7 +2206,22 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
             help="Within the high-flow subset, keeps the lowest X% by standard deviation.",
         )
         bin_reco = st.session_state.get("_rb_bin_recommendation")
-        if load_choice == "(new report)" and bin_reco and int(bin_reco.get("test_series_count", 0)) >= 2:
+        if (
+            auto_use_recommended_avg_bin
+            and _comparisons_use_average_bin(selected_comparisons)
+        ):
+            if bin_reco and int(bin_reco.get("average_series_count", 0)) >= 2:
+                st.caption(
+                    "Average-style plots will automatically use "
+                    f"{float(bin_reco['average_bin_hz']):g} Hz "
+                    "for the shared averaging grid when you generate the report."
+                )
+            else:
+                st.caption(
+                    "Average-style plots are set to use the recommended averaging "
+                    "bin automatically when the report is generated."
+                )
+        if bin_reco and int(bin_reco.get("test_series_count", 0)) >= 2:
             st.caption(
                 "Recommended per-test plot bin: "
                 + explain_frequency_bin_recommendation(
@@ -1413,7 +2234,7 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
                 key="rb_reset_plot_bin",
                 on_click=_reset_report_plot_bin,
             )
-        if load_choice == "(new report)" and bin_reco and int(bin_reco.get("average_series_count", 0)) >= 2:
+        if bin_reco and int(bin_reco.get("average_series_count", 0)) >= 2:
             st.caption(
                 "Recommended averaging bin: "
                 + explain_frequency_bin_recommendation(bin_reco)
@@ -1506,6 +2327,13 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
         return
 
     # ── Build definition ────────────────────────────────────────
+    plot_modes = _collect_report_plot_modes()
+    unique_plot_modes = {mode for mode in plot_modes.values()}
+    fallback_plot_mode = (
+        next(iter(unique_plot_modes))
+        if len(unique_plot_modes) == 1
+        else _normalize_report_plot_mode(st.session_state.get("rb_mode", "lines+markers"))
+    )
     defn = ReportDefinition(
         title=title,
         author=author,
@@ -1517,7 +2345,8 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
         show_error_bars=show_err,
         show_individual_tests=show_indiv,
         show_raw_all_sweeps=show_raw_all_sweeps,
-        plot_mode=plot_mode,
+        plot_mode=fallback_plot_mode,
+        plot_modes=plot_modes,
         marker_size=marker_size,
         opacity=opacity,
         max_raw_points=max_raw_points,
@@ -1528,6 +2357,11 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
         time_axis=time_axis,
         variability_axis=variability_axis,
         selection_mode=selection_mode,
+        overlay_entry_ids=overlay_selected_entries,
+        auto_use_recommended_avg_bin=auto_use_recommended_avg_bin,
+        overlay_include_sweep_drilldown=bool(
+            st.session_state.get("rb_overlay_sweep_drilldown", False)
+        ),
     )
 
     # ── Save template ───────────────────────────────────────────
@@ -1541,6 +2375,13 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
                     st.rerun()
                 else:
                     st.error("Name required.")
+
+    _render_report_warmup_controls(
+        defn=defn,
+        selected_entries=selected_entries,
+        selected_folders=selected_folders,
+        data_folder_str=data_folder_str,
+    )
 
     st.divider()
 
@@ -1574,8 +2415,30 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
         st.info("Select at least one comparison type above.")
         return
 
-    if st.button("🔨 Generate Report Preview", type="primary", key="rb_generate"):
-        _generate_and_preview(defn, reg, run_names, run_dirs)
+    render_preview = st.checkbox(
+        "Render inline preview after generation",
+        value=bool(st.session_state.get("rb_render_preview", False)),
+        key="rb_render_preview",
+        help=(
+            "Disable this for faster report generation when you only need the "
+            "exported HTML."
+        ),
+    )
+    if set(selected_comparisons) & {"individual_sweeps", "constant_time_series", "raw_points"}:
+        st.caption(
+            "Performance note: these selections create one or more plots per test. "
+            "Inline preview can become slow when many tests are included."
+        )
+
+    generate_requested = st.button("🔨 Generate Report", type="primary", key="rb_generate")
+    if generate_requested:
+        _generate_and_preview(
+            defn,
+            reg,
+            run_names,
+            run_dirs,
+            render_preview=render_preview,
+        )
 
     # ── If already generated, show preview + export ─────────────
     if "rb_html" in st.session_state and st.session_state.get("rb_html"):
@@ -1610,12 +2473,38 @@ def _render_build_tab(run_names: list[str], run_dirs: list) -> None:
             )
             st.success(f"✅ Saved to `{path}`")
 
+    if not generate_requested:
+        warmup_job = load_warmup_job(REPORT_WARMUP_JOB_KEY)
+        warmup_summary = summarize_warmup_job(warmup_job)
+        worker_summary = summarize_warmup_worker_state(
+            load_warmup_worker_state(REPORT_WARMUP_JOB_KEY)
+        )
+        if (
+            warmup_job
+            and warmup_job.get("auto_resume", True)
+            and not warmup_summary.get("paused", False)
+            and not worker_summary.get("running", False)
+            and warmup_summary["pending"] > 0
+        ):
+            updated_job = run_report_warmup_job(
+                run_names,
+                run_dirs,
+                max_tasks=1,
+                time_budget_s=1.25,
+                job_key=REPORT_WARMUP_JOB_KEY,
+            )
+            updated_summary = summarize_warmup_job(updated_job)
+            if updated_summary["pending"] > 0 and updated_job:
+                st.rerun()
+
 
 def _generate_and_preview(
     defn: ReportDefinition,
     reg: PumpRegistry,
     run_names: list[str],
     run_dirs: list,
+    *,
+    render_preview: bool = False,
 ) -> None:
     """Generate report sections, store HTML in session state, show preview."""
     ap = _get_analysis_plots()
@@ -1644,10 +2533,39 @@ def _generate_and_preview(
         )
         return
 
+    effective_defn = defn
+    if (
+        defn.auto_use_recommended_avg_bin
+        and _comparisons_use_average_bin(defn.comparisons)
+    ):
+        recommendation = _ensure_report_bin_recommendation(
+            selected_folders=all_folders,
+            run_names=run_names,
+            run_dirs=run_dirs,
+        )
+        if recommendation and int(recommendation.get("average_series_count", 0)) >= 2:
+            recommended_avg_bin = float(recommendation["average_bin_hz"])
+            effective_defn = replace(defn, avg_bin_hz=recommended_avg_bin)
+            st.session_state["rb_avg_bin"] = recommended_avg_bin
+
+    normalized_overlay_entry_ids = [
+        entry_id for entry_id in effective_defn.overlay_entry_ids if entry_id in entry_tests
+    ]
+    if not normalized_overlay_entry_ids and entry_tests:
+        normalized_overlay_entry_ids = list(entry_tests.keys())[:1]
+    effective_defn = replace(
+        effective_defn,
+        overlay_entry_ids=normalized_overlay_entry_ids,
+    )
+
     # ── Load data ───────────────────────────────────────────────
     with st.spinner(f"Loading {len(all_folders)} test(s)…"):
         loaded = _load_all_test_data(
-            all_folders, run_names, run_dirs, defn.bin_hz,
+            all_folders,
+            run_names,
+            run_dirs,
+            effective_defn.bin_hz,
+            max_raw_points=effective_defn.max_raw_points,
         )
 
     if loaded is None:
@@ -1664,10 +2582,15 @@ def _generate_and_preview(
 
     # ── Build display-name mappings for nicer labels ────────────
     folder_to_display: dict[str, str] = {}
+    plot_cache_contexts: dict[str, dict[str, object]] = {}
     for eid, folders in entry_tests.items():
         display_name = entry_display_names[eid]
         for f in folders:
-            folder_to_display[f] = f"{display_name} / {f[:30]}"
+            display_label = f"{display_name} / {f[:30]}"
+            folder_to_display[f] = display_label
+            run_dir = next((path for name, path in zip(run_names, run_dirs) if name == f), None)
+            if run_dir is not None:
+                plot_cache_contexts[display_label] = get_test_cache_context(f, run_dir)
 
     def _rename_keys(d: dict, mapping: dict) -> dict:
         return {mapping.get(k, k): v for k, v in d.items()}
@@ -1678,22 +2601,63 @@ def _generate_and_preview(
     display_sweep = _rename_keys(sweep_raw, folder_to_display)
     display_const = _rename_keys(const_raw, folder_to_display)
 
+    avg_binned_data: dict[str, pd.DataFrame] = {}
+    display_avg_binned: dict[str, pd.DataFrame] = {}
+    if _comparisons_use_average_bin(effective_defn.comparisons) and sweep_raw:
+        avg_binned_data = _build_common_grid_binned_sweeps(
+            sweep_raw,
+            signal_col=signal_col,
+            bin_hz=effective_defn.avg_bin_hz,
+        )
+        display_avg_binned = _rename_keys(avg_binned_data, folder_to_display)
+
     # Build bar-level grouping for bar comparison plots
     bar_binned: dict[str, dict[str, pd.DataFrame]] = {}
+    bar_avg_binned: dict[str, dict[str, pd.DataFrame]] = {}
+    bar_sweep: dict[str, dict[str, pd.DataFrame]] = {}
     bar_const: dict[str, dict[str, pd.DataFrame]] = {}
     for eid, folders in entry_tests.items():
         dname = entry_display_names[eid]
         bar_binned[dname] = {}
+        bar_avg_binned[dname] = {}
+        bar_sweep[dname] = {}
         bar_const[dname] = {}
         for f in folders:
             if f in binned_data:
                 bar_binned[dname][f] = binned_data[f]
+            if f in avg_binned_data:
+                bar_avg_binned[dname][f] = avg_binned_data[f]
+            if f in sweep_raw:
+                bar_sweep[dname][folder_to_display.get(f, f)] = sweep_raw[f]
             if f in const_raw:
                 bar_const[dname][f] = const_raw[f]
         if not bar_binned[dname]:
             del bar_binned[dname]
+        if not bar_avg_binned[dname]:
+            del bar_avg_binned[dname]
+        if not bar_sweep[dname]:
+            del bar_sweep[dname]
         if not bar_const[dname]:
             del bar_const[dname]
+
+    overlay_folders = [
+        folder
+        for entry_id in effective_defn.overlay_entry_ids
+        for folder in entry_tests.get(entry_id, [])
+    ]
+    overlay_display_binned = _rename_keys(
+        {
+            folder: binned_data[folder]
+            for folder in overlay_folders
+            if folder in binned_data
+        },
+        folder_to_display,
+    )
+    overlay_bar_sweep = {
+        entry_display_names[eid]: bar_sweep[entry_display_names[eid]]
+        for eid in effective_defn.overlay_entry_ids
+        if entry_display_names.get(eid) in bar_sweep
+    }
 
     # ── Generate requested sections ─────────────────────────────
     n_sweep = len(display_binned)
@@ -1714,9 +2678,11 @@ def _generate_and_preview(
     for comp in defn.comparisons:
         try:
             _add_comparison_section(
-                comp, sections, defn,
-                display_binned, display_raw, display_sweep, display_const,
-                bar_binned, bar_const,
+                comp, sections, effective_defn,
+                display_binned, display_avg_binned, overlay_display_binned,
+                display_raw, display_sweep, display_const,
+                bar_binned, bar_avg_binned, overlay_bar_sweep, bar_const,
+                plot_cache_contexts,
                 signal_col,
                 ap, bcp,
             )
@@ -1728,15 +2694,26 @@ def _generate_and_preview(
                 content=f"Could not generate: {exc}",
             ))
 
+    for sec in sections:
+        if sec.kind == "plot":
+            _apply_report_plot_layout(sec.content)
+
     # ── Build HTML ──────────────────────────────────────────────
     with st.spinner("Building HTML report…"):
-        html = build_report_html(defn, sections, entry_metadata)
+        html = build_report_html(effective_defn, sections, entry_metadata)
         st.session_state["rb_html"] = html
 
     st.success(
         f"✅ Report generated — {len(sections)} sections, "
         f"{len(html) / 1024:.0f} KB"
     )
+
+    if not render_preview:
+        st.info(
+            "Inline preview was skipped to keep generation responsive. "
+            "Use the export controls below, or regenerate with preview enabled."
+        )
+        return
 
     # ── Preview ─────────────────────────────────────────────────
     with st.expander("👁️ Preview (charts are shown inline)", expanded=True):
@@ -1751,14 +2728,28 @@ def _generate_and_preview(
                 if sec.title:
                     st.markdown(f"**{sec.title}**")
                 if sec.description:
-                    st.caption(sec.description)
+                    subtitle, details = _split_report_section_description(sec.description)
+                    if subtitle:
+                        st.caption(subtitle)
+                    if details:
+                        with st.expander("More detail", expanded=False):
+                            st.caption(details)
                 st.plotly_chart(sec.content, use_container_width=True)
             elif sec.kind == "table":
                 if sec.title:
                     st.markdown(f"**{sec.title}**")
                 if sec.description:
-                    st.caption(sec.description)
-                st.dataframe(sec.content, use_container_width=True, hide_index=True)
+                    subtitle, details = _split_report_section_description(sec.description)
+                    if subtitle:
+                        st.caption(subtitle)
+                    if details:
+                        with st.expander("More detail", expanded=False):
+                            st.caption(details)
+                if sec.collapsible:
+                    with st.expander("Show table", expanded=not sec.collapsed):
+                        st.dataframe(sec.content, use_container_width=True, hide_index=True)
+                else:
+                    st.dataframe(sec.content, use_container_width=True, hide_index=True)
             elif sec.kind == "divider":
                 st.divider()
 
@@ -1768,11 +2759,16 @@ def _add_comparison_section(
     sections: list[ReportSection],
     defn: ReportDefinition,
     display_binned: dict,
+    display_avg_binned: dict,
+    overlay_display_binned: dict,
     display_raw: dict,
     display_sweep: dict,
     display_const: dict,
     bar_binned: dict,
+    bar_avg_binned: dict,
+    overlay_bar_sweep: dict,
     bar_const: dict,
+    plot_cache_contexts: dict[str, dict[str, object]] | None,
     signal_col: str,
     ap,
     bcp,
@@ -1781,13 +2777,14 @@ def _add_comparison_section(
     bin_reco = st.session_state.get("_rb_bin_recommendation")
 
     if comp == "sweep_overlay":
-        if bar_binned:
+        if bar_avg_binned:
+            target_mode = _resolve_report_plot_mode(defn, "sweep_overlay_target")
             fig = bcp.plot_bar_sweep_overlay(
-                bar_binned,
+                bar_avg_binned,
                 bin_hz=defn.avg_bin_hz,
                 show_error_bars=defn.show_error_bars,
                 show_individual=defn.show_individual_tests,
-                mode=defn.plot_mode,
+                mode=target_mode,
                 marker_size=defn.marker_size,
             )
             _apply_axis_bounds(fig, defn.sweep_axis)
@@ -1808,8 +2805,8 @@ def _add_comparison_section(
                     "sweep_overlay",
                     "What you are seeing: each thick curve is the average frequency-response for one selected report target.",
                     (
-                        f"Method: raw sweep points were first grouped into {defn.bin_hz:g} Hz bins inside each test. "
-                        f"Those test-level mean curves were then aligned and averaged within each selected target on a {defn.avg_bin_hz:g} Hz grid. "
+                        f"Method: raw sweep points were binned directly onto one shared {defn.avg_bin_hz:g} Hz averaging grid for every test, "
+                        "then the tests inside each selected target were averaged on that same grid. "
                         + (
                             "The error bars show ±1 standard deviation between tests inside the same target."
                             if defn.show_error_bars
@@ -1824,55 +2821,109 @@ def _add_comparison_section(
                     _format_sweep_plot_context(
                         defn,
                         use_average_bin=True,
+                        include_test_bin=False,
                         include_individual_tests=defn.show_individual_tests,
                         axis_bounds=defn.sweep_axis,
                     ),
-                    _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
-                    _format_nested_test_listing(bar_binned),
+                    "Average-plot note: the per-test display bin is not reused here, so this view is driven directly by the raw sweep points on the shared averaging grid.",
+                    _format_render_context(
+                        defn,
+                        plot_mode=target_mode,
+                        axis_bounds=defn.sweep_axis,
+                        x_name="frequency",
+                        y_name="flow",
+                    ),
+                    _format_nested_test_listing(bar_avg_binned),
                 ),
             ))
-        if len(display_binned) > 1:
+        focused_overlay_targets = list(overlay_bar_sweep.keys())
+        overlay_scope_suffix = _format_overlay_scope_suffix(
+            focused_overlay_targets,
+            total_target_count=max(len(bar_binned), 1),
+        )
+        if overlay_display_binned:
+            tests_mode = _resolve_report_plot_mode(defn, "sweep_overlay_tests")
+            overlay_title_base = f"Frequency Sweep — All Tests Overlay{overlay_scope_suffix}"
+            overlay_title = (
+                f"{overlay_title_base} "
+                f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
+            )
             fig = ap.plot_combined_overlay(
-                display_binned,
+                overlay_display_binned,
                 show_error_bars=defn.show_error_bars,
-                mode=defn.plot_mode,
+                mode=tests_mode,
                 marker_size=defn.marker_size,
-                title=(
-                    "Frequency Sweep — All Tests Overlay "
-                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
-                ),
+                title=overlay_title,
             )
             _apply_axis_bounds(fig, defn.sweep_axis)
             sections.append(ReportSection(
                 kind="plot",
-                title=(
-                    "Frequency Sweep — All Tests Overlay "
-                    f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
-                ),
+                title=overlay_title,
                 content=fig,
                 description=_build_guided_section_description(
                     "sweep_overlay",
-                    "What you are seeing: each curve is one individual test after frequency binning.",
+                    "What you are seeing: each curve is one individual test after per-test frequency binning.",
                     (
                         f"Method: raw sweep points were grouped into {defn.bin_hz:g} Hz bins and then plotted directly per test. "
                         "The overlay therefore compares both response magnitude and where peaks or troughs occur."
+                    ),
+                    (
+                        "Focus note: this figure only includes the overlay targets chosen in Plot settings so the legend stays readable."
+                        if focused_overlay_targets
+                        else ""
                     ),
                     (
                         "Interpretation note: repeating comb-like teeth usually reflect discrete setpoints and sweep hysteresis more than small differences "
                         "in where each sweep happened to begin."
                     ),
                     _format_sweep_plot_context(defn, axis_bounds=defn.sweep_axis),
-                    _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
-                    _format_flat_test_listing(list(display_binned.keys())),
+                    _format_render_context(
+                        defn,
+                        plot_mode=tests_mode,
+                        axis_bounds=defn.sweep_axis,
+                        x_name="frequency",
+                        y_name="flow",
+                    ),
+                    _format_flat_test_listing(list(overlay_display_binned.keys())),
                 ),
             ))
+        if defn.overlay_include_sweep_drilldown and overlay_bar_sweep:
+            for target_name, target_sweeps in overlay_bar_sweep.items():
+                if not target_sweeps:
+                    continue
+                fig = ap.plot_target_sweep_drilldown(
+                    target_sweeps,
+                    signal_col=signal_col,
+                    bin_hz=defn.bin_hz,
+                    title=f"Frequency Sweep — All Sweeps Drill-Down — {target_name}",
+                    mode=_resolve_report_plot_mode(defn, "individual_per_sweep"),
+                    marker_size=max(3, defn.marker_size - 1),
+                )
+                _apply_axis_bounds(fig, defn.sweep_axis)
+                sections.append(ReportSection(
+                    kind="plot",
+                    title=f"Frequency Sweep — All Sweeps Drill-Down — {target_name}",
+                    content=fig,
+                    description=_build_guided_section_description(
+                        "individual_sweeps",
+                        "What you are seeing: every sweep from every focused test inside this target is overlaid together.",
+                        (
+                            f"Method: raw sweep points were split by sweep index, each sweep was binned at {defn.bin_hz:g} Hz, "
+                            "and the resulting sweep curves were overlaid without averaging them together."
+                        ),
+                        "Use this after the focused all-tests overlay when you need to see whether the spread comes from one unstable test or from sweep-to-sweep variation inside several tests.",
+                        _format_sweep_plot_context(defn, axis_bounds=defn.sweep_axis),
+                        _format_flat_test_listing(list(target_sweeps.keys())),
+                    ),
+                ))
 
     elif comp == "sweep_relative":
-        if bar_binned:
+        if bar_avg_binned:
+            target_mode = _resolve_report_plot_mode(defn, "sweep_relative_target")
             fig = bcp.plot_bar_sweep_relative(
-                bar_binned,
+                bar_avg_binned,
                 bin_hz=defn.avg_bin_hz,
-                mode=defn.plot_mode,
+                mode=target_mode,
                 marker_size=defn.marker_size,
             )
             _apply_axis_bounds(fig, defn.relative_axis)
@@ -1893,22 +2944,32 @@ def _add_comparison_section(
                     "sweep_relative",
                     "What you are seeing: each target’s average sweep has been rescaled so its own minimum becomes 0% and its own maximum becomes 100%.",
                     (
-                        f"Method: the same target-level average curves used in the sweep overlay were built on a {defn.avg_bin_hz:g} Hz averaging grid and then normalized independently to remove absolute flow level "
+                        f"Method: the same raw-sweep averaging path used in the target comparison was built on a shared {defn.avg_bin_hz:g} Hz grid and then normalized independently to remove absolute flow level "
                         "and emphasize shape differences across frequency."
                     ),
+                    "Average-plot note: the normalization is applied after the raw sweep data have been rebinned directly on the shared averaging grid.",
                     _format_sweep_plot_context(
                         defn,
                         use_average_bin=True,
+                        include_test_bin=False,
                         include_individual_tests=defn.show_individual_tests,
                     ),
-                    _format_render_context(defn, axis_bounds=defn.relative_axis, x_name="frequency", y_name="relative flow", include_opacity=False),
-                    _format_nested_test_listing(bar_binned),
+                    _format_render_context(
+                        defn,
+                        plot_mode=target_mode,
+                        axis_bounds=defn.relative_axis,
+                        x_name="frequency",
+                        y_name="relative flow",
+                        include_opacity=False,
+                    ),
+                    _format_nested_test_listing(bar_avg_binned),
                 ),
             ))
         if len(display_binned) > 1:
+            tests_mode = _resolve_report_plot_mode(defn, "sweep_relative_tests")
             fig = ap.plot_relative_comparison(
                 display_binned,
-                mode=defn.plot_mode,
+                mode=tests_mode,
                 marker_size=defn.marker_size,
                 title=(
                     "Relative Sweep (0–100 %) — All Tests "
@@ -1928,23 +2989,49 @@ def _add_comparison_section(
                     "What you are seeing: each test is normalized to its own 0–100% range so only the profile shape remains.",
                     "Method: per-test binned mean curves are rescaled independently before plotting, so only shape differences remain and absolute flow levels are intentionally removed.",
                     _format_sweep_plot_context(defn),
-                    _format_render_context(defn, axis_bounds=defn.relative_axis, x_name="frequency", y_name="relative flow", include_opacity=False),
+                    _format_render_context(
+                        defn,
+                        plot_mode=tests_mode,
+                        axis_bounds=defn.relative_axis,
+                        x_name="frequency",
+                        y_name="relative flow",
+                        include_opacity=False,
+                    ),
                     _format_flat_test_listing(list(display_binned.keys())),
                 ),
             ))
 
     elif comp == "individual_sweeps":
-        from ..plots.plot_generator import plot_sweep_all_points, plot_sweep_binned
+        from ..plots.plot_generator import (
+            downsample_sweep_points,
+            plot_sweep_all_points,
+            plot_sweep_binned,
+        )
         for name, binned in display_binned.items():
-            fig = plot_sweep_binned(
-                binned,
+            binned_mode = _resolve_report_plot_mode(defn, "individual_binned")
+            cache_context = (plot_cache_contexts or {}).get(name)
+            fig = _get_cached_test_figure(
+                cache_context=cache_context,
+                plot_kind="sweep_binned",
+                settings={
+                    "bin_hz": float(defn.bin_hz),
+                    "mode": binned_mode,
+                    "marker_size": int(defn.marker_size),
+                    "show_error_bars": bool(defn.show_error_bars),
+                },
+                builder=lambda: plot_sweep_binned(
+                    binned,
+                    title="",
+                    mode=binned_mode,
+                    marker_size=defn.marker_size,
+                    show_error_bars=defn.show_error_bars,
+                ),
+            )
+            fig.update_layout(
                 title=(
                     f"{name} — Binned Mean "
                     f"({format_bin_choice_label(float(defn.bin_hz), bin_reco)})"
-                ),
-                mode=defn.plot_mode,
-                marker_size=defn.marker_size,
-                show_error_bars=defn.show_error_bars,
+                )
             )
             _apply_axis_bounds(fig, defn.sweep_axis)
             sections.append(ReportSection(
@@ -1966,20 +3053,38 @@ def _add_comparison_section(
                         )
                     ),
                     _format_sweep_plot_context(defn, axis_bounds=defn.sweep_axis),
-                    _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
+                    _format_render_context(
+                        defn,
+                        plot_mode=binned_mode,
+                        axis_bounds=defn.sweep_axis,
+                        x_name="frequency",
+                        y_name="flow",
+                    ),
                     _format_flat_test_listing([name]),
                 ),
             ))
             sweep_df = display_sweep.get(name)
             if sweep_df is not None and not sweep_df.empty:
-                fig_per_sweep = ap.plot_per_test_sweeps(
-                    sweep_df,
-                    signal_col=signal_col,
-                    bin_hz=defn.bin_hz,
-                    title=f"{name} — Per-Sweep Breakdown",
-                    mode=defn.plot_mode,
-                    marker_size=defn.marker_size,
+                per_sweep_mode = _resolve_report_plot_mode(defn, "individual_per_sweep")
+                fig_per_sweep = _get_cached_test_figure(
+                    cache_context=cache_context,
+                    plot_kind="sweep_per_sweep_average",
+                    settings={
+                        "bin_hz": float(defn.bin_hz),
+                        "signal_col": signal_col,
+                        "mode": per_sweep_mode,
+                        "marker_size": int(defn.marker_size),
+                    },
+                    builder=lambda: ap.plot_per_test_sweeps(
+                        sweep_df,
+                        signal_col=signal_col,
+                        bin_hz=defn.bin_hz,
+                        title="",
+                        mode=per_sweep_mode,
+                        marker_size=defn.marker_size,
+                    ),
                 )
+                fig_per_sweep.update_layout(title=f"{name} — Per-Sweep Breakdown")
                 _apply_axis_bounds(fig_per_sweep, defn.sweep_axis)
                 sections.append(ReportSection(
                     kind="plot",
@@ -1997,30 +3102,53 @@ def _add_comparison_section(
                             bin_hz=defn.bin_hz,
                         ),
                         _format_sweep_plot_context(defn, axis_bounds=defn.sweep_axis),
-                        _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
+                        _format_render_context(
+                            defn,
+                            plot_mode=per_sweep_mode,
+                            axis_bounds=defn.sweep_axis,
+                            x_name="frequency",
+                            y_name="flow",
+                        ),
                         _format_flat_test_listing([name]),
                     ),
                 ))
 
                 if defn.show_raw_all_sweeps:
                     avg_overlay = _prepare_average_overlay(binned)
-                    raw_sweep_df = (
-                        sweep_df.sample(n=defn.max_raw_points, random_state=42)
-                        if len(sweep_df) > defn.max_raw_points
-                        else sweep_df
+                    raw_sweep_df = downsample_sweep_points(
+                        sweep_df,
+                        max_points=defn.max_raw_points,
                     )
-                    fig_all_sweeps = plot_sweep_all_points(
-                        raw_sweep_df,
-                        x_col="Frequency",
-                        y_col=signal_col,
-                        color_col="Sweep" if "Sweep" in sweep_df.columns else None,
-                        title=f"{name} — Raw All-Sweeps Layer",
-                        mode=defn.plot_mode,
-                        marker_size=defn.marker_size,
-                        opacity=defn.opacity,
-                        average_df=avg_overlay if not avg_overlay.empty else None,
-                        show_average_error_bars=defn.show_error_bars,
+                    raw_sweeps_mode = _resolve_report_plot_mode(
+                        defn,
+                        "individual_raw_all_sweeps",
                     )
+                    fig_all_sweeps = _get_cached_test_figure(
+                        cache_context=cache_context,
+                        plot_kind="sweep_all_points",
+                        settings={
+                            "max_raw_points": int(defn.max_raw_points),
+                            "signal_col": signal_col,
+                            "mode": raw_sweeps_mode,
+                            "marker_size": int(defn.marker_size),
+                            "opacity": float(defn.opacity),
+                            "show_average_error_bars": bool(defn.show_error_bars),
+                            "has_average_overlay": bool(not avg_overlay.empty),
+                        },
+                        builder=lambda: plot_sweep_all_points(
+                            raw_sweep_df,
+                            x_col="Frequency",
+                            y_col=signal_col,
+                            color_col="Sweep" if "Sweep" in sweep_df.columns else None,
+                            title="",
+                            mode=raw_sweeps_mode,
+                            marker_size=defn.marker_size,
+                            opacity=defn.opacity,
+                            average_df=avg_overlay if not avg_overlay.empty else None,
+                            show_average_error_bars=defn.show_error_bars,
+                        ),
+                    )
+                    fig_all_sweeps.update_layout(title=f"{name} — Raw All-Sweeps Layer")
                     _apply_axis_bounds(fig_all_sweeps, defn.sweep_axis)
                     sections.append(ReportSection(
                         kind="plot",
@@ -2047,21 +3175,28 @@ def _add_comparison_section(
                                 max_raw_points=defn.max_raw_points,
                                 average_overlay_bin_hz=defn.bin_hz,
                             ),
-                            _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
+                            _format_render_context(
+                                defn,
+                                plot_mode=raw_sweeps_mode,
+                                axis_bounds=defn.sweep_axis,
+                                x_name="frequency",
+                                y_name="flow",
+                            ),
                             _format_flat_test_listing([name]),
                         ),
                     ))
 
     elif comp == "global_average":
-        if len(display_binned) >= 2:
+        if len(display_avg_binned) >= 2:
+            global_average_mode = _resolve_report_plot_mode(defn, "global_average")
             fig, avg_df = ap.plot_global_average(
-                display_binned,
+                display_avg_binned,
                 bin_hz=defn.avg_bin_hz,
                 title=(
                     "Global Average Across Tests "
                     f"({format_bin_choice_label(float(defn.avg_bin_hz), bin_reco, use_average_bin=True)})"
                 ),
-                mode=defn.plot_mode,
+                mode=global_average_mode,
                 marker_size=defn.marker_size,
                 show_error_bars=defn.show_error_bars,
             )
@@ -2077,16 +3212,28 @@ def _add_comparison_section(
                     "global_average",
                     "What you are seeing: a single mean response computed across all selected tests.",
                     (
-                        f"Method: each test was first binned at {defn.bin_hz:g} Hz and then aligned onto a common {defn.avg_bin_hz:g} Hz grid for the cross-test average. "
+                        f"Method: raw sweep points from each test were binned directly onto one shared {defn.avg_bin_hz:g} Hz grid before calculating the cross-test average. "
                         + (
                             "The error bars show inter-test ±1 standard deviation."
                             if defn.show_error_bars
                             else "No inter-test standard-deviation error bars are shown."
                         )
                     ),
-                    _format_sweep_plot_context(defn, use_average_bin=True, axis_bounds=defn.sweep_axis),
-                    _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
-                    _format_flat_test_listing(list(display_binned.keys())),
+                    "Average-plot note: this plot does not reuse the display-bin curves from the all-tests overlay, so the result is not a second average of already-averaged 5 Hz curves.",
+                    _format_sweep_plot_context(
+                        defn,
+                        use_average_bin=True,
+                        include_test_bin=False,
+                        axis_bounds=defn.sweep_axis,
+                    ),
+                    _format_render_context(
+                        defn,
+                        plot_mode=global_average_mode,
+                        axis_bounds=defn.sweep_axis,
+                        x_name="frequency",
+                        y_name="flow",
+                    ),
+                    _format_flat_test_listing(list(display_avg_binned.keys())),
                 ),
             ))
             if not avg_df.empty:
@@ -2097,9 +3244,11 @@ def _add_comparison_section(
                     description=_build_guided_section_description(
                         "global_average",
                         "Tabulated frequency-grid values behind the global-average plot.",
-                        f"Method: same common-grid averaging as the plot above, using {defn.avg_bin_hz:g} Hz averaging bins after {defn.bin_hz:g} Hz per-test binning.",
-                        _format_flat_test_listing(list(display_binned.keys())),
+                        f"Method: the same shared {defn.avg_bin_hz:g} Hz raw-sweep averaging grid used in the plot above.",
+                        _format_flat_test_listing(list(display_avg_binned.keys())),
                     ),
+                    collapsible=True,
+                    collapsed=True,
                 ))
 
     elif comp == "boxplots":
@@ -2246,16 +3395,32 @@ def _add_comparison_section(
         for name, df in display_const.items():
             if df.empty or signal_col not in df.columns:
                 continue
-            x_col = df.columns[0]
-            fig = plot_time_series(
-                df,
-                x_col=x_col,
-                y_col=signal_col,
-                title=f"{name} — Flow vs Time",
-                mode=defn.plot_mode,
-                marker_size=defn.marker_size,
-                opacity=defn.opacity,
+            plot_df = _downsample_frame_evenly(df, defn.max_raw_points)
+            x_col = plot_df.columns[0]
+            time_series_mode = _resolve_report_plot_mode(defn, "constant_time_series")
+            cache_context = (plot_cache_contexts or {}).get(name)
+            fig = _get_cached_test_figure(
+                cache_context=cache_context,
+                plot_kind="time_series",
+                settings={
+                    "max_raw_points": int(defn.max_raw_points),
+                    "signal_col": signal_col,
+                    "mode": time_series_mode,
+                    "marker_size": int(defn.marker_size),
+                    "opacity": float(defn.opacity),
+                    "x_col": x_col,
+                },
+                builder=lambda: plot_time_series(
+                    plot_df,
+                    x_col=x_col,
+                    y_col=signal_col,
+                    title="",
+                    mode=time_series_mode,
+                    marker_size=defn.marker_size,
+                    opacity=defn.opacity,
+                ),
             )
+            fig.update_layout(title=f"{name} — Flow vs Time")
             _apply_axis_bounds(fig, defn.time_axis)
             sections.append(ReportSection(
                 kind="plot",
@@ -2266,8 +3431,22 @@ def _add_comparison_section(
                     "What you are seeing: raw flow versus time for one constant-frequency test.",
                     "Method: the cleaned time-series data are plotted directly without frequency binning so drift, warm-up, settling, or decay remain visible.",
                     _build_time_effect_summary(df, signal_col),
-                    "Plot context: no frequency binning is applied in this view.",
-                    _format_render_context(defn, axis_bounds=defn.time_axis, x_name="time", y_name="flow"),
+                    (
+                        "Plot context: no frequency binning is applied in this view."
+                        if len(plot_df) == len(df)
+                        else (
+                            "Plot context: no frequency binning is applied in this view. "
+                            f"For responsiveness, the plotted trace was downsampled to {len(plot_df):,} "
+                            f"evenly spaced points from {len(df):,} raw points."
+                        )
+                    ),
+                    _format_render_context(
+                        defn,
+                        plot_mode=time_series_mode,
+                        axis_bounds=defn.time_axis,
+                        x_name="time",
+                        y_name="flow",
+                    ),
                     _format_flat_test_listing([name]),
                 ),
             ))
@@ -2287,17 +3466,20 @@ def _add_comparison_section(
 
     elif comp == "raw_points":
         if display_sweep:
+            from ..plots.plot_generator import downsample_sweep_points
+
             capped = {}
             for n, d in display_sweep.items():
-                capped[n] = (
-                    d.sample(n=defn.max_raw_points, random_state=42)
-                    if len(d) > defn.max_raw_points
-                    else d
+                capped[n] = downsample_sweep_points(
+                    d,
+                    max_points=defn.max_raw_points,
                 )
+            raw_points_mode = _resolve_report_plot_mode(defn, "raw_points")
             fig = ap.plot_all_raw_points(
                 capped,
                 freq_col="Frequency",
                 signal_col=signal_col,
+                mode=raw_points_mode,
                 marker_size=defn.marker_size,
                 opacity=defn.opacity,
             )
@@ -2315,7 +3497,13 @@ def _add_comparison_section(
                         axis_bounds=defn.sweep_axis,
                         max_raw_points=defn.max_raw_points,
                     ),
-                    _format_render_context(defn, axis_bounds=defn.sweep_axis, x_name="frequency", y_name="flow"),
+                    _format_render_context(
+                        defn,
+                        plot_mode=raw_points_mode,
+                        axis_bounds=defn.sweep_axis,
+                        x_name="frequency",
+                        y_name="flow",
+                    ),
                     _format_flat_test_listing(list(capped.keys())),
                 ),
             ))
@@ -2426,6 +3614,8 @@ def _load_all_test_data(
     run_names: list[str],
     run_dirs: list,
     bin_hz: float,
+    *,
+    max_raw_points: int | None = None,
 ) -> tuple | None:
     """Load and classify all test folders.
 
@@ -2439,6 +3629,7 @@ def _load_all_test_data(
         run_dirs,
         run_names,
         bin_hz=float(bin_hz),
+        max_raw_points=max_raw_points,
     )
 
     if result.is_empty:

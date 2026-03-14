@@ -6,6 +6,7 @@ from app.data.pump_registry import Pump, PumpRegistry, PumpSubGroup, TestLink
 from app.pages.report_builder import (
     _decode_sub_group_entry_id,
     _encode_sub_group_entry_id,
+    _normalize_report_selected_entries,
     _resolve_report_entry,
 )
 
@@ -51,3 +52,14 @@ def test_resolve_report_entry_uses_only_sub_group_tests() -> None:
     assert folders == ["test-2"]
     assert [test["folder"] for test in metadata["tests"]] == ["test-2"]
     assert "Focus set" in metadata["notes"]
+
+
+def test_normalize_report_selected_entries_falls_back_to_session_state() -> None:
+    """Report Builder should keep valid selected targets if the widget returns empty."""
+    normalized = _normalize_report_selected_entries(
+        [],
+        ["Pump A", "missing", "Pump B"],
+        {"Pump A": "Pump A", "Pump B": "Pump B"},
+    )
+
+    assert normalized == ["Pump A", "Pump B"]

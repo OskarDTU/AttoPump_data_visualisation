@@ -14,6 +14,7 @@ from app.data.pump_registry import (
     Pump,
     PumpRegistry,
     PumpSubGroup,
+    registry_storage_signature,
     TestLink as PumpTestLink,
 )
 
@@ -120,3 +121,27 @@ def test_export_html_converts_scattergl_traces(tmp_path) -> None:
 
     assert exported.exists()
     assert export_fig.data[0].type == "scatter"
+
+
+def test_registry_storage_signature_tracks_saved_shared_file(tmp_path, monkeypatch) -> None:
+    """Registry file signatures should reflect shared on-disk updates."""
+    registry_path = tmp_path / "pump_registry.json"
+    monkeypatch.setattr(pump_registry, "_REGISTRY_PATH", registry_path)
+
+    initial_sig = registry_storage_signature()
+    assert initial_sig == (0, 0)
+
+    pump_registry.save_registry(PumpRegistry(pumps={"Pump A": Pump(name="Pump A")}))
+    first_sig = registry_storage_signature()
+    assert first_sig != (0, 0)
+
+    pump_registry.save_registry(
+        PumpRegistry(
+            pumps={
+                "Pump A": Pump(name="Pump A"),
+                "Pump B": Pump(name="Pump B"),
+            }
+        )
+    )
+    second_sig = registry_storage_signature()
+    assert second_sig != first_sig

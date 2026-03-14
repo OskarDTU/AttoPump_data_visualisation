@@ -46,11 +46,13 @@ class _FakeStreamlit:
 def _patch_settings_paths(monkeypatch, tmp_path) -> tuple:
     settings_dir = tmp_path / "user_settings"
     settings_path = settings_dir / "app_settings.json"
+    shared_settings_path = tmp_path / "shared_app_settings.json"
     legacy_path = tmp_path / "legacy_app_settings.json"
     monkeypatch.setattr(app_settings, "_SETTINGS_DIR", settings_dir)
     monkeypatch.setattr(app_settings, "_SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(app_settings, "_SHARED_SETTINGS_PATH", shared_settings_path)
     monkeypatch.setattr(app_settings, "_LEGACY_SETTINGS_PATH", legacy_path)
-    return settings_path, legacy_path
+    return settings_path, shared_settings_path, legacy_path
 
 
 def test_load_settings_migrates_legacy_path_and_cleans_shell_escapes(
@@ -58,20 +60,27 @@ def test_load_settings_migrates_legacy_path_and_cleans_shell_escapes(
     tmp_path,
 ) -> None:
     """Legacy repo-local settings should migrate into per-user storage."""
-    settings_path, legacy_path = _patch_settings_paths(monkeypatch, tmp_path)
+    settings_path, shared_settings_path, legacy_path = _patch_settings_paths(monkeypatch, tmp_path)
     legacy_payload = {
         "data_folder_path": "/tmp/AttoPump\\ Project/All\\ tests",
+        "saved_data_paths": {"Team path": "/tmp/AttoPump\\ Project/All\\ tests"},
+        "selected_data_path_name": "Team path",
     }
     legacy_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
 
     settings = app_settings.load_settings()
 
     assert settings.data_folder_path == "/tmp/AttoPump Project/All tests"
-    assert settings.saved_data_paths == {}
-    assert settings.selected_data_path_name == ""
+    assert settings.saved_data_paths == {"Team path": "/tmp/AttoPump Project/All tests"}
+    assert settings.selected_data_path_name == "Team path"
     assert settings_path.exists()
-    saved = json.loads(settings_path.read_text(encoding="utf-8"))
-    assert saved["data_folder_path"] == "/tmp/AttoPump Project/All tests"
+    local_saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert local_saved["data_folder_path"] == "/tmp/AttoPump Project/All tests"
+    assert local_saved["saved_data_paths"] == {}
+    shared_saved = json.loads(shared_settings_path.read_text(encoding="utf-8"))
+    assert shared_saved["saved_data_paths"] == {
+        "Team path": "/tmp/AttoPump Project/All tests"
+    }
 
 
 def test_resolve_data_path_shares_one_saved_path_across_pages(
@@ -79,13 +88,18 @@ def test_resolve_data_path_shares_one_saved_path_across_pages(
     tmp_path,
 ) -> None:
     """Entering the path on one page should make it available on the others."""
-    settings_path, _ = _patch_settings_paths(monkeypatch, tmp_path)
+    settings_path, _, _ = _patch_settings_paths(monkeypatch, tmp_path)
     data_root = tmp_path / "All tests"
     (data_root / "Run A").mkdir(parents=True)
 
+    app_settings.save_settings(
+        app_settings.AppSettings(
+            data_folder_path=str(data_root).replace(" ", "\\ "),
+        )
+    )
+
     shared_state: dict[str, str] = {}
     fake_st = _FakeStreamlit(session_state=shared_state)
-    fake_st.queue_input(str(data_root).replace(" ", "\\ "))
     monkeypatch.setattr(loader, "st", fake_st)
 
     first_path, first_dirs, first_names = loader.resolve_data_path(
@@ -127,7 +141,7 @@ def test_named_path_can_be_saved_and_selected_for_session(
     tmp_path,
 ) -> None:
     """Named saved paths should be reusable without retyping the folder."""
-    settings_path, _ = _patch_settings_paths(monkeypatch, tmp_path)
+    settings_path, shared_settings_path, _ = _patch_settings_paths(monkeypatch, tmp_path)
     data_root = tmp_path / "All tests"
     (data_root / "Run A").mkdir(parents=True)
 
@@ -144,12 +158,38 @@ def test_named_path_can_be_saved_and_selected_for_session(
 
     assert level == "success"
     assert "Oskars path" in message
-    saved = json.loads(settings_path.read_text(encoding="utf-8"))
-    assert saved["saved_data_paths"] == {"Oskars path": str(data_root)}
-    assert saved["selected_data_path_name"] == "Oskars path"
+    local_saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert local_saved["saved_data_paths"] == {}
+    assert local_saved["selected_data_path_name"] == "Oskars path"
+    shared_saved = json.loads(shared_settings_path.read_text(encoding="utf-8"))
+    assert shared_saved["saved_data_paths"] == {"Oskars path": str(data_root)}
 
     fake_st.session_state["data_path"] = ""
     fake_st.session_state["data_path_saved_selection"] = "Oskars path"
     loader._on_saved_path_selection_change()
 
     assert fake_st.session_state["data_path"] == str(data_root)
+
+
+def test_load_settings_uses_shared_named_paths_for_other_users(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A second user should see named data-source paths saved in the repo store."""
+    _, shared_settings_path, _ = _patch_settings_paths(monkeypatch, tmp_path)
+    shared_settings_path.write_text(
+        json.dumps(
+            {
+                "saved_data_paths": {
+                    "Shared lab path": "/tmp/shared/All tests",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = app_settings.load_settings()
+
+    assert settings.saved_data_paths == {"Shared lab path": "/tmp/shared/All tests"}
+    assert settings.selected_data_path_name == ""
+    assert settings.data_folder_path == ""

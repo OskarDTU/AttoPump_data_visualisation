@@ -43,6 +43,12 @@ from .io_local import (
     read_csv_full,
 )
 from .test_configs import config_storage_signature
+from .persistent_cache import (
+    load_cached_binned_test_data,
+    load_cached_prepared_test_data,
+    save_cached_binned_test_data,
+    save_cached_prepared_test_data,
+)
 from .app_settings import (
     clean_data_folder_path,
     load_settings,
@@ -126,6 +132,13 @@ def _build_test_cache_context(run_name: str, run_dir: str | Path) -> dict[str, A
     }
 
 
+def get_test_cache_context(run_name: str, run_dir: str | Path) -> dict[str, Any]:
+    """Return the persistent-cache context for one test folder."""
+    context = _build_test_cache_context(run_name, run_dir)
+    context.pop("run_dir_str", None)
+    return context
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _prepare_test_data_cached(
     run_name: str,
@@ -139,12 +152,21 @@ def _prepare_test_data_cached(
     experiment_log_signature: tuple[str, int, int],
 ) -> PreparedTestData:
     """Load and preprocess one test into reusable time/sweep/constant frames."""
+    cache_context = {
+        "run_name": run_name,
+        "data_root_str": data_root_str,
+        "csv_path_str": csv_path_str,
+        "csv_signature": csv_signature,
+        "metadata_signature": metadata_signature,
+        "user_patterns_signature": user_patterns_signature,
+        "test_config_signature": test_config_signature,
+        "experiment_log_signature": experiment_log_signature,
+    }
+    cached = load_cached_prepared_test_data(**cache_context)
+    if cached is not None:
+        return cached
+
     del run_dir_str
-    del csv_signature
-    del metadata_signature
-    del user_patterns_signature
-    del test_config_signature
-    del experiment_log_signature
 
     df = load_csv_cached(csv_path_str)
     if df.empty:
@@ -186,21 +208,31 @@ def _prepare_test_data_cached(
                 full_df=df if has_freq else None,
                 time_format=time_format,
             )
-            return PreparedTestData(
+            prepared = PreparedTestData(
                 time_series_data=ts_df,
                 signal_col=signal_col,
                 test_type=test_type,
                 sweep_data=sweep_df,
             )
+            try:
+                save_cached_prepared_test_data(prepared, **cache_context)
+            except Exception:
+                pass
+            return prepared
 
     const_freq = detect_constant_frequency(df, run_name, data_root=data_root_str)
-    return PreparedTestData(
+    prepared = PreparedTestData(
         time_series_data=ts_df,
         signal_col=signal_col,
         test_type=test_type,
         const_data=ts_df,
         const_freq=const_freq,
     )
+    try:
+        save_cached_prepared_test_data(prepared, **cache_context)
+    except Exception:
+        pass
+    return prepared
 
 
 def load_prepared_test_data(run_name: str, run_dir: str | Path) -> PreparedTestData:
@@ -223,6 +255,23 @@ def _bin_prepared_test_cached(
     bin_hz: float,
 ) -> pd.DataFrame:
     """Return cached binned sweep data for one test and bin width."""
+    cache_context = {
+        "run_name": run_name,
+        "data_root_str": data_root_str,
+        "csv_path_str": csv_path_str,
+        "csv_signature": csv_signature,
+        "metadata_signature": metadata_signature,
+        "user_patterns_signature": user_patterns_signature,
+        "test_config_signature": test_config_signature,
+        "experiment_log_signature": experiment_log_signature,
+    }
+    cached = load_cached_binned_test_data(
+        bin_hz=float(bin_hz),
+        **cache_context,
+    )
+    if cached is not None:
+        return cached
+
     prepared = _prepare_test_data_cached(
         run_name=run_name,
         run_dir_str=run_dir_str,
@@ -237,12 +286,21 @@ def _bin_prepared_test_cached(
     if prepared.sweep_data is None:
         return pd.DataFrame()
 
-    return bin_by_frequency(
+    binned = bin_by_frequency(
         prepared.sweep_data,
         value_col=prepared.signal_col,
         freq_col="Frequency",
         bin_hz=bin_hz,
     )
+    try:
+        save_cached_binned_test_data(
+            binned,
+            bin_hz=float(bin_hz),
+            **cache_context,
+        )
+    except Exception:
+        pass
+    return binned
 
 
 def load_binned_test_data(
